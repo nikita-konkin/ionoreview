@@ -1,0 +1,23 @@
+{
+  "source": "C:\\Users\\VV\\.t3\\projects\\no1",
+  "target": "N:\\ionoreview",
+  "pilot": "datasets/pilot",
+  "note": "Copied; source retained as backup. No annotation status changed.",
+  "pilot_files_verified": 84,
+  "pilot_differences": [],
+  "pilot_annotation_hashes": {
+    "case_001.json": "1f697e6c7f1e2084d17c23afe65af0abd9ec019a5c2d161df117332eb1a99352",
+    "case_002.json": "97b0fdcb6d2b9c111e0d95af43446096b19f1a8f547e77ada0fdb1b1f21979e3",
+    "case_003.json": "25116e0d3fcc00912a0c3173653881d38b002925da2a47ec7416ef1217db0cb5",
+    "case_004.json": "9e90601b786e56a980f427d719135feb19c1686d0114207976cf9a4fcbb85416",
+    "case_005.json": "8cf5990a937a1238c054a5a6e4b2aa65416617d9f494b8acd170ae812558051e",
+    "case_006.json": "58b88ecbc260202064273f8d602d61bf87435d0939c5a7c8226481c9d745b952",
+    "case_007.json": "ab15199ce884440fbb01e70dbde4cef34c5d599911319753daee187a01d30179",
+    "case_008.json": "bce5ec7090667e87b29ce4c8d1187af3bdaf39abded8549c4af010410ebfcbd4",
+    "case_009.json": "43cdf02ac66b64e636923f997379377546ff941d787c1d47a0b92ba2204c5b47",
+    "case_010.json": "47ff5969935e1af748e19a4e8cf6ede56b4c0e3baf6835b20394c3dc3a9e3eba",
+    "case_011.json": "1b8cd9264aa02c5ade17f3d684419f8d17a8e50dd243e609be7962cdb50e341c",
+    "case_012.json": "1900fbdd71ef8a605530aa18561e1b71f91ada8c5fe06b4155d35b64838c320c"
+  },
+  "pilot_accepted": 12
+}

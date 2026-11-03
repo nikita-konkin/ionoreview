@@ -1,0 +1,394 @@
+"""Mapping spectrogram bin indices to physical frequency and virtual range.
+
+This module is the single place the ionogram axes are defined.
+
+The range axis is **descending**: bin 0 is the largest virtual range. This was
+established empirically rather than assumed. For
+``data/2026.02.04/cyprus1_20260204_000010.lfs`` the echo sits at raw fftshifted
+bin 3909 of 8192; under the ascending convention ``linspace(-R, +R)`` used for
+the y-axis in ``MUF.py:116`` that maps to -2732 km, which is not a physically
+possible virtual range, while ``R - idx*step`` maps it to +2739 km -- correct
+for a transmitter-receiver great-circle distance of ~2600 km.
+
+``MUF.py`` gets a correct-looking *picture* only because it reverses the array
+with ``[::-1]`` when plotting; its *extractor* path carries the sign error, and
+``MUF.py:297``'s ``if vrng < 0: vrng = R + vrng`` is a patch over it. Defining
+the axis once, correctly, removes the need for that patch.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+import numpy as np
+
+from .io_lfs import LfsHeader
+
+C_KM_S = 3e8 / 1e3          # speed of light in km/s
+EARTH_RADIUS_KM = 6371.0
+
+# An oblique echo cannot arrive earlier than the ground path, but the header's
+# own rmin is often 0. When the great-circle distance is unavailable we fall
+# back to this floor rather than searching ranges no echo can occupy.
+FALLBACK_MIN_RANGE_KM = 1500.0
+
+# Fraction of the great-circle distance used as the low edge of the default
+# gate. Slightly below 1.0 to leave room for calibration error in the geometry.
+GROUND_RANGE_MARGIN = 0.90
+
+
+def ground_range_km(header: LfsHeader) -> float | None:
+    """Great-circle transmitter-receiver distance, or None if unusable.
+
+    Returns None for vertical sounding and for headers whose coordinates are
+    absent or implausible.
+    """
+    if not header.is_oblique:
+        return None
+    lat1, lon1 = header.tx_latitude, header.tx_longitude
+    lat2, lon2 = header.rx_latitude, header.rx_longitude
+    coords = (lat1, lon1, lat2, lon2)
+    if any(c is None or not math.isfinite(c) for c in coords):
+        return None
+    if not (-90 <= lat1 <= 90 and -90 <= lat2 <= 90):
+        return None
+    if not (-180 <= lon1 <= 180 and -180 <= lon2 <= 180):
+        return None
+    if lat1 == lat2 and lon1 == lon2:
+        return None
+
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = p2 - p1
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * EARTH_RADIUS_KM * math.asin(min(1.0, math.sqrt(a)))
+
+
+def sweep_bounds(header: LfsHeader) -> tuple[float, float]:
+    """Start and stop frequency of the chirp sweep, in MHz."""
+    freq_start = (header.cf - header.sample_rate / 2) / 1e6
+    freq_stop = freq_start + (header.dur * header.rate) / 1e6
+    return freq_start, freq_stop
+
+
+def range_half_span(header: LfsHeader) -> float:
+    """Half-width of the virtual-range axis, in km.
+
+    The de-chirped beat frequency maps to delay through the chirp rate, so the
+    post-decimation bandwidth ``sample_rate/dec`` spans +/- this many km.
+    """
+    sr = header.sample_rate / header.dec
+    return C_KM_S * (sr / header.div_coef) / header.rate
+
+
+def range_resolution_km(header: LfsHeader, window: int) -> float:
+    """True delay resolution, in km, for a given FFT window length.
+
+    A window of ``window`` samples at ``sr`` Hz lasts ``window/sr`` seconds and
+    so resolves beat frequency to ``sr/window`` Hz; through the chirp rate that
+    is ``C_KM_S * (sr/window) / rate`` km. That equals the *unpadded* bin
+    spacing, which is the point: zero-padding subdivides bins without resolving
+    anything further, so the true resolution is always
+    ``range_step * (1 + zero_periods)``.
+
+    For window=8192 at sr=40 kHz this is 14.65 km.
+    """
+    return 2 * range_half_span(header) / window
+
+
+def default_gate(header: LfsHeader) -> tuple[float, float]:
+    """Physically sensible virtual-range gate, in km.
+
+    Upper edge from the header's ``rmax``; lower edge from the ground path when
+    the geometry allows, otherwise from ``rmin`` with a floor.
+    """
+    hi = float(header.rmax) if header.rmax > 0 else 5000.0
+
+    ground = ground_range_km(header)
+    if ground is not None:
+        lo = ground * GROUND_RANGE_MARGIN
+    else:
+        lo = max(float(header.rmin), FALLBACK_MIN_RANGE_KM)
+
+    lo = max(lo, float(header.rmin))
+    if lo >= hi:  # nonsense header; fall back to a wide but finite window
+        lo, hi = FALLBACK_MIN_RANGE_KM, max(hi, 5000.0)
+    return lo, hi
+
+
+#: Hops a geometry gate leaves room for. Three covers what is worth keeping on
+#: the paths this receives: at 864 km a 3-hop echo is still inside the
+#: unambiguous window, and beyond that the returns are too weak to scale.
+DEFAULT_MAX_HOPS = 3
+
+#: Slack on each edge of a geometry gate, in km. The hop calculation is
+#: flat-Earth and the mirror heights are a scanned band, not a measurement, so
+#: an echo may sit slightly outside the predicted family. Cropping a real trace
+#: is worse than admitting some noise.
+GEOMETRY_GATE_MARGIN_KM = 100.0
+
+
+def geometry_gate(header, *,
+                  max_hops: int = DEFAULT_MAX_HOPS,
+                  margin_km: float = GEOMETRY_GATE_MARGIN_KM
+                  ) -> tuple[float, float] | None:
+    """Range window an echo on this path can physically occupy. ``None`` if unknown.
+
+    Where :func:`default_gate` asks the *instrument* what it recorded, this
+    asks the *path* what is possible: the shortest echo is one hop at the
+    lowest plausible mirror height, the longest is ``max_hops`` at the highest.
+    Both edges come from :func:`muf.trace.hop_range_km`, the same formula
+    ``identify_hops`` labels segments with, so a gate and a hop label cannot
+    disagree about what a range means.
+
+    This exists for receivers whose stored extent says nothing about the path.
+    A ``.lfs`` header carries an ``rmax`` chosen for its own circuit, and a v2
+    chirp product was gated at acquisition -- but a digisonde product holds the
+    whole unambiguous window, ``c`` times the inter-pulse period, which is a
+    property of the transmitter's pulse timing and not of the geometry. On an
+    864 km path that window reaches 3597 km while no echo can arrive before
+    998, and the near third of it is where the interference lives.
+
+    Returns ``None`` for vertical sounding and for headers without usable
+    coordinates, which is the caller's cue to fall back.
+    """
+    from .trace import HOP_HEIGHTS_KM, hop_range_km
+
+    ground = ground_range_km(header)
+    if ground is None:
+        return None
+    lo = hop_range_km(ground, 1, min(HOP_HEIGHTS_KM)) - margin_km
+    hi = hop_range_km(ground, max(1, max_hops), max(HOP_HEIGHTS_KM)) + margin_km
+    return max(lo, 0.0), hi
+
+
+#: Fraction of the peak-above-baseline that still counts as trace, when
+#: :func:`auto_gate` grows the window outward from the busiest range.
+AUTO_GATE_FLOOR_FRACTION = 0.25
+
+#: How much sky to leave above and below what was found, in km. Enough that a
+#: sporadic-E leg or a second hop just outside the main concentration is still
+#: visible rather than cropped into invisibility.
+AUTO_GATE_MARGIN_KM = 150.0
+
+#: Range smoothing before the peak search, in km. One trace is a few bins
+#: wide; without this the argmax lands on whichever single bin got lucky.
+AUTO_GATE_SMOOTH_KM = 40.0
+
+#: Per-frequency quantile above which a cell counts as "bright". 0.98 keeps
+#: roughly the top 2 % of each row, which is a trace and not a noise field.
+AUTO_GATE_QUANTILE = 0.98
+
+
+def auto_gate(power, vrange, *,
+              quantile: float = AUTO_GATE_QUANTILE,
+              floor_fraction: float = AUTO_GATE_FLOOR_FRACTION,
+              margin_km: float = AUTO_GATE_MARGIN_KM,
+              smooth_km: float = AUTO_GATE_SMOOTH_KM) -> tuple[float, float] | None:
+    """Find the range window the echo actually occupies. ``None`` if it does not.
+
+    Search-mode v2 products are stored over the whole analysis window --
+    +/-3998 km at DOB, 3999 bins of 2 km -- while the trace occupies a few
+    hundred. Plotted honestly that is a thin bright line across an empty
+    field, and the ionogram is unreadable at any sensible figure size.
+
+    Works on the loaded array rather than on a header, so it is the same code
+    for both formats: v2 arrives sparsified and NaN-filled to the row median,
+    `.lfs` arrives dense, and "cells above this row's 98th percentile" means
+    the same thing to both.
+
+    The statistic is a *count*, not a sum of power. An ionospheric trace is
+    contiguous in frequency, so it stacks up at one range across many rows;
+    noise that happens to clear the storage threshold is scattered, and
+    contributes to every range equally. Summing SNR instead lets a handful of
+    float16-clipped noise cells drag the window open -- measured on the
+    2026-08-05 archive, the SNR-weighted version returned 88 % of the axis and
+    this one returns 6 %.
+
+    Returns ``None`` -- deliberately, rather than a guess -- when no range
+    stands out above the baseline. A sounding of pure noise has no window to
+    find, and inventing one would crop the evidence that there is nothing
+    there.
+    """
+    power = np.asarray(power)
+    vrange = np.asarray(vrange, dtype=np.float64)
+    if power.ndim != 2 or power.shape[0] < 2 or len(vrange) < 3:
+        return None
+
+    with np.errstate(invalid="ignore"):
+        threshold = np.nanquantile(power, quantile, axis=1, keepdims=True)
+        profile = (power > threshold).sum(axis=0).astype(np.float64)
+    if not np.isfinite(profile).all() or profile.max() <= 0:
+        return None
+
+    step = abs(float(vrange[1] - vrange[0])) or 1.0
+    width = max(3, int(smooth_km / step) | 1)          # odd, so it is centred
+    profile = np.convolve(profile, np.ones(width) / width, mode="same")
+
+    baseline = float(np.median(profile))
+    peak = float(profile.max())
+    if peak <= baseline * 1.5:
+        return None
+
+    cut = baseline + floor_fraction * (peak - baseline)
+    lo_i = hi_i = int(np.argmax(profile))
+    while lo_i > 0 and profile[lo_i - 1] > cut:
+        lo_i -= 1
+    while hi_i < len(profile) - 1 and profile[hi_i + 1] > cut:
+        hi_i += 1
+
+    # The axis descends, so index order is not range order.
+    lo_km, hi_km = sorted((float(vrange[lo_i]), float(vrange[hi_i])))
+    return lo_km - margin_km, hi_km + margin_km
+
+
+def gate_indices(
+    half_span: float, step: float, lo_km: float, hi_km: float, n_range: int
+) -> tuple[int, int]:
+    """Inclusive index range on the descending axis covering ``lo_km..hi_km``.
+
+    Because the axis descends, the *higher* range maps to the *lower* index.
+    """
+    axis_max = half_span
+    axis_min = half_span - (n_range - 1) * step
+    # Test for intersection before clamping: clamping first would silently turn
+    # a gate that misses the axis entirely into a single valid bin.
+    if hi_km < axis_min or lo_km > axis_max:
+        raise ValueError(
+            f"empty range gate {lo_km:.0f}..{hi_km:.0f} km "
+            f"(axis spans {axis_min:.0f}..{axis_max:.0f} km)"
+        )
+
+    i_lo = max(0, min(math.ceil((half_span - hi_km) / step), n_range - 1))
+    i_hi = max(0, min(math.floor((half_span - lo_km) / step), n_range - 1))
+    if i_hi < i_lo:
+        raise ValueError(
+            f"empty range gate {lo_km:.0f}..{hi_km:.0f} km "
+            f"(narrower than one {step:.1f} km bin)"
+        )
+    return i_lo, i_hi
+
+
+def sweep_step_mhz(header: LfsHeader, window: int) -> float:
+    """Frequency advance per FFT window, in MHz.
+
+    One window spans ``window/sr`` seconds, during which the transmitter sweeps
+    at ``rate`` Hz/s. This -- not the nominal endpoint -- is what fixes the
+    frequency axis, and it stays correct when a recording is cut short.
+    """
+    sr = header.sample_rate / header.dec
+    return (window / sr) * header.rate / 1e6
+
+
+@dataclass(frozen=True)
+class Calibration:
+    """Physical axes for one ionogram."""
+
+    freq: np.ndarray          # MHz, ascending, one per FFT window
+    vrange: np.ndarray        # km, DESCENDING, gated slice
+    freq_start: float
+    freq_stop: float          # highest frequency actually swept
+    freq_stop_nominal: float  # what the header's `dur` implies
+    half_span: float          # km, half-width of the ungated range axis
+    range_step: float         # km per range bin
+    resolution_km: float      # true delay resolution (>= range_step)
+    gate_km: tuple[float, float]
+    gate_idx: tuple[int, int]  # inclusive, into the ungated axis
+    n_range_full: int
+    # Lowest frequency the product actually holds data for, when that is above
+    # `freq_start`. None means the axis and the data start together, which is
+    # every .lfs file and every complete v2 product. See `freq_lo`.
+    freq_floor: float | None = None
+
+    @property
+    def freq_step_mhz(self) -> float:
+        if len(self.freq) < 2:
+            return 0.0
+        return float(self.freq[1] - self.freq[0])
+
+    @property
+    def freq_lo(self) -> float:
+        """Lowest frequency with data: `freq_floor` if set, else the axis start.
+
+        Not the same as `freq_start` on a v2 product whose analysis began late.
+        On Yoshkar-Ola's search-mode days (2026-09-25..27) 44% of 100 kHz/s
+        products have NaN rows from 7 MHz up to as far as 31 MHz: the rank that
+        analysed the sweep waited for a free slot, and by the time it read the
+        ringbuffer the start of the sweep had been overwritten. The axis still
+        says 7.05 MHz. An LOF read off such a product is the frequency where
+        the data begins, not where the ionosphere starts returning.
+        """
+        return self.freq_start if self.freq_floor is None else self.freq_floor
+
+    @property
+    def sweep_complete(self) -> bool:
+        """False when the recording lacks part of the sweep at either end.
+
+        Truncated files still carry a header claiming the full sweep, so this
+        is the only way to notice. A MUF from a sweep cut short at the top is
+        capped by where the recording stopped; an LOF from one missing its
+        bottom is floored by where it began. Neither is the ionosphere.
+        """
+        step = self.freq_step_mhz
+        return (self.freq_stop >= self.freq_stop_nominal - step
+                and self.freq_lo <= self.freq_start + step)
+
+    @property
+    def sweep_fraction(self) -> float:
+        """How much of the intended sweep the recording actually contains."""
+        span = self.freq_stop_nominal - self.freq_start
+        if span <= 0:
+            return 1.0
+        return max(0.0, self.freq_stop - self.freq_lo) / span
+
+    @property
+    def n_freq(self) -> int:
+        return len(self.freq)
+
+    @property
+    def n_range(self) -> int:
+        return len(self.vrange)
+
+
+def build(
+    header: LfsHeader,
+    n_freq: int,
+    window: int,
+    zero_periods: int = 0,
+    gate_km: tuple[float, float] | None = None,
+) -> Calibration:
+    """Construct the axes for a spectrogram of ``n_freq`` windows.
+
+    ``window`` and ``zero_periods`` fix the ungated range-bin count; ``gate_km``
+    overrides the header-derived default gate.
+    """
+    n_range_full = window * (1 + zero_periods)
+    freq_start, freq_stop_nominal = sweep_bounds(header)
+    half_span = range_half_span(header)
+    step = 2 * half_span / n_range_full
+
+    lo_km, hi_km = gate_km if gate_km is not None else default_gate(header)
+    i_lo, i_hi = gate_indices(half_span, step, lo_km, hi_km, n_range_full)
+
+    # From the chirp rate rather than by stretching to the nominal endpoint: a
+    # recording cut short still declares the full sweep in its header, and
+    # stretching would place its last window at 32.5 MHz when the transmitter
+    # had only reached 14.6. Windows are labelled at their centre, since the
+    # spectrum is an average over the window's duration.
+    freq_step = sweep_step_mhz(header, window)
+    freq = freq_start + (np.arange(n_freq) + 0.5) * freq_step
+
+    return Calibration(
+        freq=freq,
+        vrange=half_span - np.arange(i_lo, i_hi + 1) * step,
+        freq_start=freq_start,
+        freq_stop=float(freq_start + n_freq * freq_step),
+        freq_stop_nominal=freq_stop_nominal,
+        half_span=half_span,
+        range_step=step,
+        resolution_km=range_resolution_km(header, window),
+        gate_km=(lo_km, hi_km),
+        gate_idx=(i_lo, i_hi),
+        n_range_full=n_range_full,
+    )

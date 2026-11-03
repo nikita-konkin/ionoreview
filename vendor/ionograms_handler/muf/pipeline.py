@@ -1,0 +1,699 @@
+"""Driving the estimators over files and days.
+
+One spectrogram is formed per sounding and shared by every estimator, so adding
+a method costs almost nothing beyond the method itself.
+
+Where the ~265 ms a warm sounding costs actually goes, measured rather than
+assumed: 172 ms forming the spectrogram, 86 ms in the k-means estimator, under
+a millisecond each in the other two, and 7 ms reading the 80 MB off disk.
+Inside the spectrogram, the per-frequency noise floor -- one ``np.median`` over
+the full spectrum per frequency, `muf.spectro` -- costs 80 ms against the FFTs'
+54 ms, so the medians, not the transforms, are the hottest thing here. The I/O
+is a rounding error on a local disk and the first thing to move on a bad mount.
+
+`tools/benchmark.py` re-measures all of it on demand; the figures above are one
+machine on one day and are only meaningful against that same box later.
+"""
+
+from __future__ import annotations
+
+import multiprocessing as mp
+import os
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from . import extractors, fit, interference, loader, spectro, trace
+from . import lof as lof_module
+from . import pick as pick_module
+from .extractors import DEFAULT_METHODS
+from .loader import find_soundings, read_header
+
+#: A pick within this many frequency bins of the top of the sweep means the
+#: trace ran off the end of the band: the true MUF is at or above the highest
+#: sounded frequency and the instrument cannot see it. Recorded rather than
+#: reported as a measurement.
+#:
+#: Counted in bins rather than MHz because estimators can legitimately land a
+#: bin or two short of the edge -- the algorithmic one anchors on the middle of
+#: a three-bin run, so it can never reach the final bin -- and a fixed MHz
+#: tolerance would mean different things at different window lengths.
+#:
+#: **Three bins below where the sweep says it stops is not three bins below
+#: where the circuit stops.** ``freq_stop`` is a header field. The usable top is
+#: set by the transmitter, the antennas and the path, and when it sits lower the
+#: threshold lands above anything the receiver can see, so the flag never fires
+#: and every clipped pick is recorded as an ordinary measurement. Supply the
+#: real one through ``Options.band_ceiling_mhz``.
+BAND_EDGE_BINS = 3
+
+
+def sounded_ceiling(cal, band_ceiling_mhz: float | None = None) -> float:
+    """The highest frequency this circuit actually returns echoes at.
+
+    Defaults to the sweep's declared ``freq_stop``, which is right only when the
+    transmitter, the antennas and the path all reach it. See
+    :func:`muf.lof.measure_band_ceiling` for recovering it from recordings.
+    """
+    if band_ceiling_mhz is None:
+        return float(cal.freq_stop)
+    # Never above what this product recorded. A circuit's ceiling says how high
+    # the path *can* return; a sweep whose top was never analysed cannot show a
+    # trace above where its data stops, so a pick there is a bound whatever the
+    # registry says.
+    return min(float(band_ceiling_mhz), float(cal.freq_stop))
+
+
+def circuit_ceiling(header, options: Options) -> float | None:
+    """The ceiling to use for one sounding, or None to fall back to the sweep.
+
+    Order is explicit-flag, then registry, then nothing. The flag wins because
+    it is the one an operator typed for this run -- typically while measuring a
+    circuit that is not in the registry yet, which is exactly when a stale
+    registry entry must not override them.
+
+    The registry lookup is keyed on both ends. An archive holding several
+    transmitters into one receiver gets a different ceiling per transmitter
+    from a single run, which is the case that made a per-run flag inadequate:
+    DOB records NIC and SGO in the same directory and they do not give out at
+    the same frequency.
+
+    ``options.stations is None`` is resolved the same way every loader call in
+    this module resolves it -- to the built-in table. It used to be read here
+    as "no registry", so a default ``Options()`` loaded NIC->DOB's geometry
+    from the table and then missed its 24.53 MHz ceiling, and the CLI's
+    ``limited_`` flags and SAO ``D`` letters disagreed with the server's for
+    the same sounding.
+
+    A plain mapping -- coordinates and nothing else -- carries no ceilings, so
+    it yields ``None`` rather than raising.
+    """
+    if options.band_ceiling_mhz is not None:
+        return float(options.band_ceiling_mhz)
+    lookup = getattr(loader.resolve_stations(options.stations),
+                     "band_ceiling", None)
+    if lookup is None:
+        return None
+    return lookup(getattr(header, "tx_name", ""),
+                  getattr(header, "rx_name", ""),
+                  getattr(header, "t0", None))
+
+
+def band_edge_mhz(cal, band_ceiling_mhz: float | None = None) -> float:
+    """At or above this frequency a pick is a lower bound, not a measurement.
+
+    One definition, shared by the ``limited_`` columns and by the SAO ``D``
+    qualifying letter, so the CSV and the export cannot disagree about which
+    picks are censored. They were computed separately until 2026-08-13 and the
+    duplicate is how the anchor bug survived being fixed in one place.
+    """
+    ceiling = sounded_ceiling(cal, band_ceiling_mhz)
+    return ceiling - BAND_EDGE_BINS * cal.freq_step_mhz
+
+
+def lof_floor_mhz(cal, band_floor_mhz: float | None = None) -> float | None:
+    """The floor an LOF is censored against: the circuit's, raised to where
+    this product's data actually begins. See `Calibration.freq_lo`."""
+    if cal.freq_floor is None:
+        return band_floor_mhz
+    return max(band_floor_mhz or cal.freq_floor, cal.freq_floor)
+
+
+def lof_bounded(cal, low):
+    """``low`` with ``at_band_floor`` set wherever the LOF is not a measurement.
+
+    At the floor, as before. And whenever the bottom of the sweep was never
+    computed, **however far above the gap the LOF sits**: "no echo between the
+    data's start and here" says nothing about the stretch below that was never
+    observed. The 291 s product of 2026-09-27 06:44 had data from 19.55 MHz and
+    an algo LOF of 27.6 -- eight MHz clear of the floor and still a bound.
+
+    One definition for the ``loflim_`` columns and the SAO ``E`` letter, for
+    the reason `band_edge_mhz` gives for the MUF side.
+    """
+    if low is None or low.at_band_floor or cal.freq_floor is None:
+        return low
+    if not np.isfinite(low.lof_mhz):
+        return low
+    return replace(low, at_band_floor=True)
+
+
+@dataclass
+class Options:
+    """Everything that affects a sounding's result."""
+
+    window: int = spectro.DEFAULT_WINDOW
+    zero_periods: int = spectro.DEFAULT_ZERO_PERIODS
+    gate_km: tuple[float, float] | None = None
+    methods: tuple[str, ...] = DEFAULT_METHODS
+    min_run: int | None = None
+    percentile: float | None = None
+    #: Steepest range-against-frequency slope a run may have, km/MHz. ``None``
+    #: means "decide per format": off for ``.lfs`` and chirp2, where every
+    #: result to date was produced without it, and on for digisonde, where the
+    #: band is crowded enough that consecutive lit bins are no evidence of a
+    #: trace on their own. Set it explicitly to force either way.
+    max_range_slope: float | None = None
+    cache_dir: Path | None = None
+    method_options: dict[str, dict] | None = None
+    fit: bool = True
+    segment: bool = True
+    lof: bool = True
+    #: Lowest frequency the circuit actually radiates. None means the sweep
+    #: start, which is right only when the transmitter really does reach it --
+    #: see muf.lof.measure_band_floor.
+    band_floor_mhz: float | None = None
+    #: Highest frequency the circuit actually returns echoes at, which is what
+    #: the `limited_` flags are measured against. None means the sweep stop, and
+    #: that default is wrong wherever the path gives out first: DOB's Cyprus
+    #: circuit declares 24.825 MHz and nothing was ever seen above 24.55, so
+    #: over 216 picks -- 40 of them stacked in the top two bins -- `limited_`
+    #: fired exactly zero times. See muf.lof.measure_band_ceiling.
+    band_ceiling_mhz: float | None = None
+    #: Override extension-based format selection. None means dispatch on the
+    #: suffix, which is right unless a recording was renamed.
+    format: str | None = None
+    #: Station coordinate registry. ``None`` means the built-in table, which
+    #: is what `loader.resolve_stations` turns it into; pass ``{}`` for no
+    #: registry at all -- then a v2 product has no geometry (see
+    #: io_chirp.ChirpHeader.has_coordinates) and an .lfs one is read exactly
+    #: as its header was written.
+    stations: dict | None = None
+    #: Flatten frequency rows whose above-threshold energy spans more range
+    #: than any echo can. Off by default because it changes results, and a
+    #: transform that changes a MUF must be asked for -- see muf.interference,
+    #: which also records how little it changed when measured.
+    reject_interference: bool = False
+    #: Flatten features narrow in frequency with no trace at their range on
+    #: either side -- a carrier, a stripe, a sweep-end splash. On by default:
+    #: it was written against a MUF that was wrong, and measured over the
+    #: archive to remove nothing that was a trace. See muf.carriers.
+    reject_carriers: bool = True
+
+    def per_method(self) -> dict[str, dict]:
+        """Method keyword arguments, with the shared picker settings folded in."""
+        shared: dict[str, object] = {}
+        if self.min_run is not None:
+            shared["min_run"] = self.min_run
+        if self.percentile is not None:
+            shared["percentile"] = self.percentile
+        if self.max_range_slope is not None:
+            shared["max_range_slope"] = self.max_range_slope
+
+        out: dict[str, dict] = {}
+        for name in self.methods:
+            opts = dict(shared)
+            opts.update((self.method_options or {}).get(name, {}))
+            out[name] = opts
+        return out
+
+
+def _path_km(header) -> float:
+    from .geometry import path_of
+
+    return path_of(header)[2]
+
+
+def process_file(path: str | Path, options: Options | None = None) -> dict:
+    """Run every selected estimator over one sounding. Returns one result row."""
+    options = options or Options()
+    path = Path(path)
+
+    row: dict[str, object] = {"file": path.name}
+    try:
+        header = read_header(path, format=options.format,
+                             stations=options.stations)
+    except Exception as exc:
+        row["error"] = f"{type(exc).__name__}: {exc}"
+        return row
+
+    row.update(
+        datetime=header.datetime.replace(tzinfo=None),
+        # `loader.format_of`, not `header.format`: the header carries the .lfs
+        # file's magic number ("LFSG") against v2's "chirp2", which is two
+        # spellings of one distinction. The loader's constants are the
+        # normalized pair, and are what `sounding.format` is documented to
+        # hold (`services/api/schema.sql`).
+        format=loader.format_of(path, options.format),
+        tx=header.tx_name,
+        rx=header.rx_name,
+        path_type=header.path_type,
+        # Carried so `muf compare --ref-model` can locate the path's control
+        # point without going back to the .lfs files.
+        tx_lat=round(header.tx_latitude, 4),
+        tx_lon=round(header.tx_longitude, 4),
+        rx_lat=round(header.rx_latitude, 4),
+        rx_lon=round(header.rx_longitude, 4),
+        path_km=round(_path_km(header), 1),
+        # Hz/s. What separates two emitters that arrive in the same second at
+        # different rates -- the sources page needs it to show a search-mode
+        # product under the right census row. NaN for a pulsed Digisonde.
+        chirp_rate=getattr(header, "rate", None),
+    )
+
+    try:
+        ion = loader.load(
+            path,
+            window=options.window,
+            zero_periods=options.zero_periods,
+            gate_km=options.gate_km,
+            cache_dir=options.cache_dir,
+            format=options.format,
+            header=header,
+            stations=options.stations,
+        )
+    except Exception as exc:
+        row["error"] = f"{type(exc).__name__}: {exc}"
+        return row
+
+    ion, rejected = interference.apply(ion, options)
+    if rejected.bursts is not None and rejected.bursts.any:
+        row["interference_rows"] = rejected.bursts.n_rows
+    if rejected.carriers is not None and rejected.carriers.any:
+        row["carriers"] = rejected.carriers.describe()
+
+    ceiling = circuit_ceiling(header, options)
+
+    row.update(
+        # The window the ionogram was actually formed at, which for .h5 is what
+        # `io_chirp` reconstructed from the stored axes rather than what
+        # `options.window` asked for -- v2 fixed it at archive time and the raw
+        # IQ is gone, so the two differ. Paired with `format` this is what says
+        # whether a sounding can be re-derived at another window (sec. 3.4).
+        window=ion.window,
+        freq_start=round(ion.cal.freq_start, 4),
+        freq_stop=round(ion.cal.freq_stop, 4),
+        # What the `limited_` flags below were actually measured against.
+        # Recorded because it is an *input*, not a property of the file: a run
+        # given the real ceiling and a run trusting the header produce the same
+        # MUF column and different censoring, and nothing else in the row says
+        # which one you are holding. With the registry supplying it per circuit,
+        # one run can now carry several values in this column.
+        band_ceiling=round(sounded_ceiling(ion.cal, ceiling), 4),
+        gate_lo=round(ion.cal.gate_km[0], 1),
+        gate_hi=round(ion.cal.gate_km[1], 1),
+        # A recording cut short still declares the full sweep in its header.
+        # Its MUF is capped by where the recording stopped, so it is a lower
+        # bound like a band-limited pick, and is flagged the same way.
+        sweep_complete=ion.cal.sweep_complete,
+        sweep_fraction=round(ion.cal.sweep_fraction, 4),
+    )
+
+    # The floor an LOF is censored against: the circuit's own, if one was
+    # supplied, raised to where this product's data actually begins. A v2
+    # product analysed late is missing the bottom of its sweep (see
+    # `Calibration.freq_lo`), and an LOF found at the first row that has data
+    # says only that the ionosphere returned *somewhere at or below* it.
+    lof_floor = lof_floor_mhz(ion.cal, options.band_floor_mhz)
+
+    per_method = options.per_method()
+    if options.max_range_slope is None and getattr(header, "format", "") == "digisonde":
+        # A digisonde reception is one antenna listening to a crowded band it
+        # was never pointed at, and the consecutive-bins rule is easy to
+        # satisfy there by accident: four DOB circuits all reported 3.05 MHz
+        # while their pick ranges wandered over 1700 km. Requiring the range
+        # to agree across neighbouring frequencies is what separates a trace
+        # from a coincidence. Applied per format rather than globally, because
+        # switching it on for `.lfs` would move every result already published.
+        for opts in per_method.values():
+            opts.setdefault("max_range_slope", pick_module.DEFAULT_MAX_RANGE_SLOPE)
+
+    results = extractors.run(ion, methods=options.methods, **per_method)
+    band_edge = band_edge_mhz(ion.cal, ceiling)
+
+    for name, result in results.items():
+        pick = result.pick
+        row[f"muf_{name}"] = pick.muf_mhz
+        row[f"vrange_{name}"] = pick.vrange_km
+        row[f"ndet_{name}"] = pick.n_detections
+        row[f"run_{name}"] = pick.run_len
+        row[f"snr_{name}"] = pick.snr_db
+
+        # Fitting the nose costs a polyfit over a couple of hundred points, so
+        # it is always computed: the residual is a useful quality signal even
+        # when the vertex itself is not trustworthy.
+        # Segmenting reveals when the "trace" is really several propagation
+        # modes stitched together -- which the extractors cannot see, since
+        # their continuity rule looks only along frequency.
+        segments = None
+        if options.segment and result.ok:
+            freq, vrange, weight = trace.extract_points(ion, result)
+            segments = trace.merge_branches(trace.identify_hops(
+                trace.group_tracks(freq, vrange, weight), row["path_km"]))
+            primary = trace.primary_segment(segments)
+            row[f"nseg_{name}"] = len({s.group for s in segments})
+            row[f"hops_{name}"] = primary.hops if primary else None
+            row[f"branch_{name}"] = (
+                sum(1 for s in segments if s.branch == "high") > 0)
+            row[f"scatter_{name}"] = round(
+                trace.trace_scatter_km(primary.vrange) if primary else np.nan, 1)
+
+        if options.fit:
+            # Fit both branches of the nose when they were found: with the
+            # vertex bracketed by data rather than extrapolated off one side,
+            # the fit is a far better estimator.
+            if segments is not None:
+                nose = fit.fit_nose(*trace.nose_points(segments))
+            else:
+                nose = fit.fit_result(ion, result)
+            row[f"fit_{name}"] = nose.muf_mhz if nose.ok else np.nan
+            row[f"fitres_{name}"] = nose.rms_residual_mhz
+            row[f"fitex_{name}"] = nose.extrapolation_mhz if nose.ok else np.nan
+        # The trace reaching the top of the sweep means the MUF is at or above
+        # it; the value is a lower bound, not a measurement.
+        row[f"limited_{name}"] = bool(pick.ok and pick.muf_mhz >= band_edge)
+
+        # The low-frequency end of this estimator's own trace, so LOF and MUF
+        # describe the same detected set and can be compared per method.
+        if options.lof:
+            low = lof_bounded(ion.cal, lof_module.pick_lof(
+                result.presence, ion.freq, power_db=ion.db, vrange=ion.vrange,
+                min_run=options.min_run or pick_module.DEFAULT_MIN_RUN,
+                band_floor_mhz=lof_floor,
+            ))
+            row[f"lof_{name}"] = low.lof_mhz
+            row[f"lofsnr_{name}"] = low.snr_db
+            # At the floor the true LOF is below the band: an upper bound, the
+            # mirror image of limited_. `lof_bounded` extends that to every LOF
+            # on a product missing the bottom of its sweep.
+            row[f"loflim_{name}"] = bool(low.at_band_floor)
+
+        if result.error:
+            row[f"err_{name}"] = result.error
+
+    # Estimator-independent, straight off the ionogram: these stay comparable
+    # when the estimators change, which the per-method columns do not.
+    if options.lof:
+        for level, low in lof_module.ladder(
+            ion, min_run=options.min_run or pick_module.DEFAULT_MIN_RUN,
+            band_floor_mhz=lof_floor,
+        ).items():
+            row[f"lof{round(level)}"] = low.lof_mhz
+
+    return row
+
+
+def _worker(args: tuple[Path, Options]) -> dict:
+    return process_file(*args)
+
+
+#: The thread-pool knobs of every math library underneath us, in the spelling
+#: each one reads. NumPy's own FFT is single-threaded, but BLAS and the OpenMP
+#: runtime k-means clusters through are not: left alone each *worker process*
+#: opens about as many threads as the machine has cores.
+_THREAD_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
+#: Hold each worker to one math thread. Set ``MUF_PIN_THREADS=0`` to leave the
+#: libraries to their own devices.
+#:
+#: Workers are already processes, so the parallelism is ours to hand out and
+#: theirs to duplicate: eight workers on a ten-core machine were opening up to
+#: eighty threads to share ten cores. Measured over one day of the real archive
+#: -- 133 files, 10.6 GB, 10 cores -- pinning took eight workers from 13.5 s to
+#: 8.7 s, 9.8 to 15.3 files/s, and turned a 2.9x speed-up over one worker into
+#: 4.7x. Every pick was identical, which is the only reason this is on by
+#: default.
+#:
+#: Deliberately not applied at ``jobs=1``: with no second process to contend
+#: with, the threads are free parallelism and taking them away cost 5 %.
+PIN_THREADS = os.environ.get("MUF_PIN_THREADS", "1") not in ("0", "", "false")
+
+#: How worker processes are created, in order of preference. **Never ``fork``**,
+#: which is the platform default on Linux and deadlocks this pipeline outright.
+#:
+#: ``kmeans`` is scikit-learn's, and running it initialises the OpenMP runtime
+#: in whatever process ran it. libgomp is not fork-safe: a child forked from
+#: such a process inherits a thread pool whose threads do not exist on its side
+#: of the fork, and hangs on the first parallel region it reaches. Not slowly --
+#: forever, with no error, holding whatever lock its caller held.
+#:
+#: A short-lived CLI run never meets this, because nothing ran ``kmeans`` before
+#: the pool was built. The api does: ``services.api.read_routes`` renders an
+#: ionogram with its picks in-process, through ``extractors.run``, whose default
+#: methods include ``kmeans``. One such page view arms the deadlock for every
+#: later scan in that process, and the scan holds the archive lock while it
+#: hangs -- so a single ionogram view could stop the server indexing until
+#: someone restarted the container.
+#:
+#: Measured in the deployed image, after a parent-side ``kmeans``, 20 soundings
+#: at ``jobs=4``: fork never returned; forkserver and spawn both took 1.4 s.
+#: forkserver first because it pays the interpreter start once rather than per
+#: worker.
+POOL_START_METHODS = ("forkserver", "spawn")
+
+
+def pool_context():
+    """A multiprocessing context whose workers are not forked. See above."""
+    available = mp.get_all_start_methods()
+    for name in POOL_START_METHODS:
+        if name in available:
+            return mp.get_context(name)
+    # Nothing but fork available. Vanishingly unlikely -- spawn is on every
+    # supported platform -- and better than refusing to run at all, so it is
+    # allowed through rather than raising.
+    return mp.get_context()
+
+
+@contextmanager
+def _pinned_threads(enabled: bool = True):
+    """Hold the math libraries to one thread each, for workers spawned inside.
+
+    Set in this process' environment rather than through a pool ``initializer``
+    because the libraries read these once, as they load. A worker imports
+    NumPy on the way to unpickling its first task, which is *before* any
+    initializer of ours can run -- by then the thread pool it would resize
+    already exists. Spawned children inherit the environment, so setting it
+    here is early enough and an initializer is not.
+
+    An operator who has set a count already means it; only unset names are
+    filled in. The environment is restored on the way out, so a caller that
+    runs a pool and then does its own numerics is not left pinned.
+    """
+    if not enabled:
+        yield
+        return
+    previous = {name: os.environ.get(name) for name in _THREAD_VARS}
+    try:
+        for name, was in previous.items():
+            if was is None:
+                os.environ[name] = "1"
+        yield
+    finally:
+        for name, was in previous.items():
+            if was is None:
+                os.environ.pop(name, None)
+
+
+def process_many(
+    target,
+    options: Options | None = None,
+    jobs: int = 1,
+    progress: bool = True,
+) -> pd.DataFrame:
+    """Run the pipeline over files, directories, or several of either.
+
+    Several days can be given at once; the result is one table covering them
+    all, sorted by time. Use :func:`split_by_day` to write it out per day.
+    """
+    options = options or Options()
+    paths = find_soundings(target, format=options.format)
+    if not paths:
+        raise FileNotFoundError(f"no soundings under {target}")
+
+    if jobs <= 0:
+        jobs = max(1, (os.cpu_count() or 2) - 1)
+
+    rows: list[dict] = []
+    if jobs == 1:
+        iterator = (process_file(p, options) for p in paths)
+        rows = list(_maybe_progress(iterator, len(paths), progress))
+    else:
+        # Around the whole pool, not just its construction: workers are spawned
+        # on demand, so the last one can start well after the first task does.
+        with _pinned_threads(PIN_THREADS):  # noqa: SIM117 -- see above
+            # `mp_context` rather than the platform default: see
+            # `POOL_START_METHODS`. The environment pinned just above is
+            # inherited by the workers either way, because both remaining
+            # start methods pass it to a fresh interpreter.
+            with ProcessPoolExecutor(max_workers=jobs,
+                                     mp_context=pool_context()) as pool:
+                iterator = pool.map(_worker, [(p, options) for p in paths])
+                rows = list(_maybe_progress(iterator, len(paths), progress))
+
+    frame = pd.DataFrame(rows)
+    if "datetime" in frame:
+        frame = frame.sort_values("datetime").reset_index(drop=True)
+    return frame
+
+
+def _maybe_progress(iterator, total: int, enabled: bool):
+    if not enabled:
+        return iterator
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        return iterator
+    return tqdm(iterator, total=total, unit="sounding")
+
+
+# --- daily aggregation -------------------------------------------------------
+#
+# Reimplemented rather than imported: the inherited muf_interpolation.py and
+# data_handler/muf_data_handler.py both imported psycopg2 at module scope, so
+# neither could be imported without a database driver installed. The logic
+# they contained is small enough that duplicating it cost less than the
+# coupling -- and both files are gone now (`f94f561`), which settles it.
+
+DEFAULT_GRID_MINUTES = 5
+DEFAULT_SAVGOL_WINDOW = 19
+DEFAULT_SAVGOL_ORDER = 1
+
+
+def days_in(frame: pd.DataFrame) -> list:
+    """The distinct dates present in a results table, in order.
+
+    A sounding whose header could not be read has no ``datetime`` -- the row
+    carries ``error`` instead -- so the column holds NaT and sorting it raises.
+    One truncated file must not abort the day it was found in: a recorder
+    killed mid-write leaves exactly one, and the other 318 soundings are fine.
+    """
+    if "datetime" not in frame or frame.empty:
+        return []
+    dates = pd.to_datetime(frame["datetime"], errors="coerce").dt.date
+    return sorted(d for d in dates.dropna().unique())
+
+
+def split_by_day(frame: pd.DataFrame):
+    """Yield ``(date, sub_frame)`` for each day in a results table.
+
+    Rows with no usable timestamp belong to no day and are dropped here; they
+    are still counted in the run summary, and ``error`` says why.
+    """
+    if "datetime" not in frame or frame.empty:
+        return
+    dates = pd.to_datetime(frame["datetime"], errors="coerce").dt.date
+    for day in sorted(d for d in dates.dropna().unique()):
+        yield day, frame[dates == day].reset_index(drop=True)
+
+
+def daily(
+    frame: pd.DataFrame,
+    method: str | None = None,
+    grid_minutes: int = DEFAULT_GRID_MINUTES,
+    smooth: bool = True,
+    savgol_window: int = DEFAULT_SAVGOL_WINDOW,
+    savgol_order: int = DEFAULT_SAVGOL_ORDER,
+    drop_limited: bool = True,
+) -> pd.DataFrame:
+    """Resample MUF onto a regular grid and smooth it.
+
+    Akima interpolation then linear fill, matching ``muf_interpolation.py:35``;
+    Savitzky-Golay smoothing matching ``muf_data_handler.py:74``. Both files
+    were removed in ``f94f561``; the line numbers resolve against its parent.
+
+    A table spanning several days is handled a day at a time and the results
+    concatenated, so a missing day leaves a gap rather than being interpolated
+    across. Each row carries the ``date`` it belongs to.
+
+    Band-limited picks are dropped by default: they are lower bounds, and
+    treating them as measurements flattens the midday peak.
+    """
+    method = method or _first_method(frame)
+    column = f"muf_{method}"
+    if column not in frame:
+        raise KeyError(f"no results for method {method!r} in this table")
+
+    pieces, failures = [], []
+    for day, sub in split_by_day(frame):
+        try:
+            pieces.append(_daily_one(sub, method, column, grid_minutes, smooth,
+                                     savgol_window, savgol_order, drop_limited))
+        except ValueError as exc:
+            failures.append(f"{day}: {exc}")
+
+    if not pieces:
+        raise ValueError(
+            f"method {method!r} produced no usable values"
+            + (" (" + "; ".join(failures) + ")" if failures else "")
+        )
+
+    out = pd.concat(pieces, ignore_index=True)
+    out.attrs["skipped_days"] = failures
+    return out
+
+
+def _daily_one(
+    frame: pd.DataFrame, method: str, column: str, grid_minutes: int,
+    smooth: bool, savgol_window: int, savgol_order: int, drop_limited: bool,
+) -> pd.DataFrame:
+    """One day's curve. See :func:`daily`."""
+    from scipy.signal import savgol_filter
+
+    from .compare import flag
+
+    series = frame[["datetime", column]].copy()
+    if drop_limited and f"limited_{method}" in frame:
+        series = series[~flag(frame, f"limited_{method}").to_numpy()]
+    series = series.dropna()
+    if series.empty:
+        raise ValueError("no usable values")
+
+    series["datetime"] = pd.to_datetime(series["datetime"])
+    series = series.set_index("datetime").sort_index()
+
+    day = series.index[0].normalize()
+    grid = pd.date_range(day, day + pd.Timedelta(days=1),
+                         freq=f"{grid_minutes}min", inclusive="left")
+
+    joined = series[column].reindex(series.index.union(grid))
+    joined = joined.interpolate(method="akima", limit_direction="both")
+    joined = joined.interpolate(method="linear", limit_direction="both")
+    out = pd.DataFrame({"muf": joined.reindex(grid).round(3)}, index=grid)
+    out.index.name = "datetime"
+
+    if smooth and len(out) > savgol_window:
+        window = savgol_window + (savgol_window % 2 == 0)   # must be odd
+        out["muf_smooth"] = savgol_filter(
+            out["muf"].to_numpy(), window, savgol_order
+        ).round(3)
+
+    out = out.reset_index()
+    out.insert(1, "date", day.date())
+    out["method"] = method
+    return out
+
+
+def _first_method(frame: pd.DataFrame) -> str:
+    for column in frame.columns:
+        if isinstance(column, str) and column.startswith("muf_"):
+            return column[4:]
+    raise KeyError("this table has no muf_* columns")
+
+
+def methods_in(frame: pd.DataFrame) -> list[str]:
+    """Method names present in a results table."""
+    return [c[4:] for c in frame.columns
+            if isinstance(c, str) and c.startswith("muf_")]
+
+
+def write(frame: pd.DataFrame, path: str | Path, fmt: str = "csv") -> Path:
+    """Write a results table as CSV or Parquet."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if fmt == "parquet":
+        frame.to_parquet(path, index=False)
+    elif fmt == "csv":
+        frame.to_csv(path, index=False)
+    else:
+        raise ValueError(f"unknown format {fmt!r}")
+    return path

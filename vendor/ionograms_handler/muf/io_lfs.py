@@ -1,0 +1,269 @@
+"""Reading ``.lfs`` chirp-ionosonde files.
+
+An ``.lfs`` file is a 512-byte header followed by interleaved complex64 IQ
+samples. This module replaces the 30 sequential ``seek``/``unpack`` calls in
+``lfs_header.py`` with a single fixed-layout unpack, and returns scalars rather
+than the 1-tuples that forced ``header['cf'][0]`` at every call site.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import struct
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Mapping
+
+import numpy as np
+
+from .paths import dedupe_paths
+
+HEADER_SIZE = 512
+
+# Field layout, little-endian, offsets in bytes from the start of the file.
+# `s` fields are fixed-width NUL-padded ASCII.
+#
+# The one deviation from lfs_header.py is rx_longitude: that file reads it at
+# offset 150, which is rx_latitude's offset, so header['rx_longitude'] has
+# always held the latitude. rx_name occupies 86..149 and rx_latitude 150..153,
+# which puts the longitude at 154.
+_LAYOUT = (
+    ("format", 0, "4s"),
+    ("format_ver", 4, "f"),
+    ("header_id", 8, "4s"),
+    ("header_size", 12, "H"),
+    ("tx_name", 14, "64s"),
+    ("tx_latitude", 78, "f"),
+    ("tx_longitude", 82, "f"),
+    ("rx_name", 86, "64s"),
+    ("rx_latitude", 150, "f"),
+    ("rx_longitude", 154, "f"),
+    ("start_year", 158, "H"),
+    ("start_daynumber", 160, "H"),
+    ("start_month", 162, "H"),
+    ("start_day", 164, "H"),
+    ("start_hour", 166, "H"),
+    ("start_minute", 168, "H"),
+    ("start_second", 170, "H"),
+    ("start_epoch", 172, "I"),
+    ("chirpt", 176, "I"),
+    ("cf", 180, "I"),
+    ("dur", 184, "H"),
+    ("rate", 186, "I"),
+    ("rep", 190, "I"),
+    ("rmin", 194, "i"),
+    ("rmax", 198, "i"),
+    ("dec", 202, "I"),
+    ("sample_rate", 206, "I"),
+    ("whiten", 210, "H"),
+    ("whiten_len", 212, "I"),
+    ("whiten_n", 216, "I"),
+)
+
+
+def _clean(raw: bytes) -> str:
+    """Decode a fixed-width NUL-padded ASCII field."""
+    return raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").strip()
+
+
+@dataclass(frozen=True)
+class LfsHeader:
+    """Acquisition parameters for one sounding."""
+
+    path: Path
+
+    format: str
+    format_ver: float
+    header_id: str
+    header_size: int
+
+    tx_name: str
+    tx_latitude: float
+    tx_longitude: float
+    rx_name: str
+    rx_latitude: float
+    rx_longitude: float
+
+    start_year: int
+    start_daynumber: int
+    start_month: int
+    start_day: int
+    start_hour: int
+    start_minute: int
+    start_second: int
+    start_epoch: int
+
+    chirpt: int
+    cf: int          # centre frequency, Hz
+    dur: int         # sweep duration, s
+    rate: int        # chirp rate, Hz/s
+    rep: int
+    rmin: int        # intended range gate, km
+    rmax: int        # intended range gate, km
+    dec: int         # decimation
+    sample_rate: int  # Hz, before decimation
+    whiten: int
+    whiten_len: int
+    whiten_n: int
+
+    #: Which ends took their coordinates from the station registry instead of
+    #: from this file: ``()``, ``("tx",)``, ``("rx",)`` or both.
+    #:
+    #: A silent correction is the one thing this must not be. A wrong
+    #: coordinate does not raise -- it yields a plausible path length and a
+    #: wrong virtual height -- so whether the numbers in play are the file's or
+    #: the table's has to be answerable after the fact.
+    from_registry: tuple[str, ...] = ()
+
+    @property
+    def datetime(self) -> _dt.datetime:
+        return _dt.datetime(
+            self.start_year, self.start_month, self.start_day,
+            self.start_hour, self.start_minute, self.start_second,
+            tzinfo=_dt.timezone.utc,
+        )
+
+    @property
+    def is_oblique(self) -> bool:
+        """True when transmitter and receiver are different sites."""
+        return self.tx_name != self.rx_name
+
+    @property
+    def path_type(self) -> str:
+        return "oblique" if self.is_oblique else "vertical"
+
+    @property
+    def div_coef(self) -> float:
+        """Range-scaling divisor: 2 for oblique paths, 4 for vertical sounding.
+
+        A vertical sounding's echo travels up and back over the same path, so
+        the round-trip factor differs from the oblique case.
+        """
+        return 2.0 if self.is_oblique else 4.0
+
+    def __str__(self) -> str:
+        return (
+            f"{self.tx_name}->{self.rx_name} ({self.path_type}) "
+            f"{self.datetime:%Y-%m-%d %H:%M:%S}Z"
+        )
+
+
+def read_header(path: str | Path,
+                stations: Mapping[str, tuple[float, float]] | None = None
+                ) -> LfsHeader:
+    """Parse the 512-byte header of an ``.lfs`` file.
+
+    ``stations`` is a registry that **supersedes** the coordinates in the file
+    for any end whose name it knows. Unlike :func:`muf.io_chirp.read_header`,
+    where the registry is the only source of geometry, here it is a
+    correction: an ``.lfs`` header always carries lat/lon, and without a
+    registry those are used verbatim.
+
+    ``None`` means no registry, as it does in every reader in this package;
+    :func:`muf.loader.resolve_stations` is the one place that turns that into
+    the built-in table.
+
+    The correction exists because the archive's ``cyprus1`` and v2's ``NIC``
+    are one Nicosia transmitter recorded 59.9 km apart -- 35.0/34.0 in the
+    header against 35.18557/33.38228 in ``server.ini`` -- and one site cannot
+    have two positions depending on which receiver logged it.
+    """
+    path = Path(path)
+    with open(path, "rb") as fh:
+        blob = fh.read(HEADER_SIZE)
+    return parse_header(blob, path, stations)
+
+
+def parse_header(blob: bytes, path: str | Path,
+                 stations: Mapping[str, tuple[float, float]] | None = None
+                 ) -> LfsHeader:
+    """:func:`read_header` on bytes already in hand.
+
+    For a header kept somewhere other than the head of its recording -- the
+    echo window's standalone file stores the source's 512 bytes verbatim, so
+    the axes it is re-derived on are the recording's own (``muf.echo_window``).
+    ``path`` is only what the header will report as its file.
+    """
+    path = Path(path)
+    blob = bytes(blob)
+    if len(blob) < HEADER_SIZE:
+        raise ValueError(f"{path}: truncated, {len(blob)} bytes < {HEADER_SIZE}")
+
+    values: dict[str, object] = {"path": path}
+    for name, offset, fmt in _LAYOUT:
+        (raw,) = struct.unpack_from("<" + fmt, blob, offset)
+        values[name] = _clean(raw) if fmt.endswith("s") else raw
+
+    header = LfsHeader(**values)  # type: ignore[arg-type]
+    if header.format != "LFSG":
+        raise ValueError(f"{path}: not an LFS file (magic {header.format!r})")
+    return _with_registry_coordinates(header, stations)
+
+
+def _with_registry_coordinates(
+        header: LfsHeader,
+        stations: Mapping[str, tuple[float, float]] | None) -> LfsHeader:
+    """Replace each end's coordinates with the registry's, where it has them."""
+    if stations is None:
+        return header
+
+    changed: dict[str, object] = {}
+    corrected: list[str] = []
+    for end, name in (("tx", header.tx_name), ("rx", header.rx_name)):
+        entry = stations.get(name) if name else None
+        if entry is None:
+            continue
+        lat, lon = float(entry[0]), float(entry[1])
+        # Recorded even when the numbers agree to the last decimal: the
+        # provenance is "the table said so", and that stays true on the day
+        # the table is corrected and the file is not.
+        corrected.append(end)
+        changed[f"{end}_latitude"] = lat
+        changed[f"{end}_longitude"] = lon
+
+    if not corrected:
+        return header
+    return replace(header, from_registry=tuple(corrected), **changed)
+
+
+def read_iq(path: str | Path, max_samples: int | None = None) -> np.ndarray:
+    """Read the complex64 IQ payload that follows the header."""
+    count = -1 if max_samples is None else int(max_samples)
+    return np.fromfile(path, dtype=np.complex64, offset=HEADER_SIZE, count=count)
+
+
+def n_samples(path: str | Path) -> int:
+    """Number of complex64 samples in the payload, without reading it."""
+    return (Path(path).stat().st_size - HEADER_SIZE) // 8
+
+
+def find_lfs(target) -> list[Path]:
+    """Return the ``.lfs`` files under ``target``, sorted by name.
+
+    ``target`` may be a file, a directory (searched recursively), or any
+    iterable of those -- so several days' folders can be processed in one go.
+    Sorting by name sorts by time, since filenames embed the timestamp.
+    Duplicates are removed, which matters when a directory and a file inside it
+    are both named.
+    """
+    if isinstance(target, (str, Path)):
+        targets = [Path(target)]
+    else:
+        targets = [Path(t) for t in target]
+    if not targets:
+        raise FileNotFoundError("no target given")
+
+    found: list[Path] = []
+    missing: list[Path] = []
+    for item in targets:
+        if item.is_file():
+            found.append(item)
+        elif item.is_dir():
+            found.extend(item.rglob("*.lfs"))
+        else:
+            missing.append(item)
+
+    if missing and not found:
+        raise FileNotFoundError(", ".join(str(m) for m in missing))
+
+    return dedupe_paths(found)

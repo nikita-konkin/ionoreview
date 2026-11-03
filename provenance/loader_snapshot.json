@@ -1,0 +1,6 @@
+{
+  "source": "N:\\ionograms-handler",
+  "head": "1d5dda925b30a08ad5efee5136fc029c1a3686e8",
+  "working_tree_status": " M services/agent/health.py\n M services/agent/ionozond.py\n M services/agent/runner.py\n M services/agent/schedulecheck.py\n M services/api/control_routes.py\n M services/api/db.py\n M services/api/live_routes.py\n M services/api/locale/en.py\n M services/api/locale/ru.py\n M services/api/sounder.py\n M services/api/sounder_routes.py\n M services/api/templates/console.html\n M services/api/templates/live.html\n M services/api/web_routes.py\n M services/publish/site/strings.json\n M tests/test_agent.py\n M tests/test_agent_runner.py\n M tests/test_agent_schedulecheck.py\n M tests/test_api.py\n M tests/test_api_live_routes.py\n M tests/test_api_sounder.py\n M tools/echo_window_check.py\n?? tests/test_channel_compare.py\n?? tools/channel_compare.py\n",
+  "note": "Snapshot of the actual working tree; source project unchanged."
+}

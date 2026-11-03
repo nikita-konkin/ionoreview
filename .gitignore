@@ -1,0 +1,9 @@
+__pycache__/
+.pytest_cache/
+review_data/
+datasets/
+reports/
+references/
+exports/
+.venv/
+*.log
