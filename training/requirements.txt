@@ -1,0 +1,14 @@
+torch==2.11.0
+torchvision==0.26.0
+transformers==5.22.1
+huggingface-hub==1.33.0
+peft==0.21.2
+accelerate==1.15.0
+bitsandbytes==0.50.2
+shapely==2.2.0
+mcp==1.30.0
+datasets==4.4.1
+pyarrow==21.0.0
+numpy==1.26.4
+Pillow>=10
+psutil>=5.9,<8

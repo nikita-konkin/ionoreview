@@ -7,3 +7,8 @@ references/
 exports/
 .venv/
 *.log
+training/data/
+training/reports/
+training/local.json
+build/
+dist/
