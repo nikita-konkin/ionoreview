@@ -187,10 +187,13 @@ def image_features(image):
 
     On colour scientific plots, grey/white plot margins are excluded. The
     user should crop the actual graph and adjust the brightness threshold.
+    Grey plots use the dominant background to infer dark/light signal polarity.
     """
     rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
     brightness = rgb @ np.asarray([.299, .587, .114], dtype=np.float32)
     colour = np.ptp(rgb, axis=2) > 35
     if colour.mean() > .01:
         brightness = np.where(colour, brightness, 0)
+    elif np.median(brightness)>127:
+        brightness=255-brightness
     return brightness.astype(np.float32)

@@ -17,12 +17,14 @@ def check_item(pair):
     pack,item=pair
     try:
         image_path=safe_child(pack,item['image'])
-        array_path=safe_child(pack,item['axes'])
-        if digest(image_path)!=item['image_sha256'] or digest(array_path)!=item['axes_sha256']:
+        if digest(image_path)!=item['image_sha256']:
             raise ValueError('checksum mismatch')
         with Image.open(image_path) as image:
             if image.size!=(item['width'],item['height']):raise ValueError('PNG dimensions')
             image.verify()
+        if not item.get('axes'):return {'ok':True,'id':item['id']}
+        array_path=safe_child(pack,item['axes'])
+        if digest(array_path)!=item['axes_sha256']:raise ValueError('array checksum mismatch')
         with np.load(array_path,allow_pickle=False) as data:
             db,freq,ranges=data['db'],data['freq_mhz'],data['range_km']
             if db.shape!=(item['height'],item['width']) or db.shape!=(len(ranges),len(freq)):
@@ -53,6 +55,9 @@ def verify(project, workers=4):
     inventory=read_json(project/'reports'/'inventory.json')
     prepared={i['id'] for _,i in pairs}
     unresolved={r['id']:dict(r) for r in inventory['records'] if r['id'] not in prepared}
+    fallbacks={raw_id:i['id'] for _,i in pairs for raw_id in i.get('fallback_for',[])}
+    for ident,row in unresolved.items():
+        if ident in fallbacks:row['png_fallback_id']=fallbacks[ident]
     error_file=project/'reports'/'preparation_errors.jsonl'
     if error_file.exists():
         for line in error_file.read_text(encoding='utf8').splitlines():
@@ -67,20 +72,25 @@ def verify(project, workers=4):
     report={'schema':'ionoreview-preparation-report/1','finished_at':utcnow(),
         'project':str(project),'source_root':inventory['root'],'packs':len(rows),
         'ready':len(pairs),'new_archive_ready':sum(r['count'] for r in rows if r['path']!='pilot'),
+        'numeric_ready':sum(bool(i.get('axes')) for _,i in pairs),
+        'image_only_ready':sum(not i.get('axes') for _,i in pairs),
         'pilot':sum(len(read_json(r['full_path']/'manifest.json')['items']) for r in rows if r['path']=='pilot'),
         'by_kind':dict(Counter(i.get('source_kind','pilot') for _,i in pairs)),
         'review_status':dict(status),'total_bytes':total_bytes,
         'free_bytes':shutil.disk_usage(project).free,'unresolved_count':len(unresolved),
+        'unresolved_with_png_fallback':sum('png_fallback_id' in r for r in unresolved.values()),
         'unresolved':list(unresolved.values()),'integrity_errors':failures,
         'verified':len(pairs)-len(failures),
         'note':'New archive records are pending expert review. Raw recordings remain at source_root.'}
     atomic_json(project/'reports'/'preparation_summary.json',report)
     lines=['# Подготовка ионограмм', '',f"Проект: `{project}`",f"Исходный архив: `{inventory['root']}`",'',
         f"Готово: **{len(pairs)}** ионограмм в **{len(rows)}** наборах.",
+        f"С числовыми осями: **{report['numeric_ready']}**; только PNG: **{report['image_only_ready']}**.",
         f"Проверено без ошибок: **{report['verified']}**. Ошибок целостности: **{len(failures)}**.",
         f"Статусы разметки: {dict(status)}.",
         f"Объём наборов: {total_bytes/1024**3:.2f} ГиБ. Свободно: {report['free_bytes']/1024**3:.2f} ГиБ.",
-        '',f"Не подготовлено из обнаруженного архива: **{len(unresolved)}**.",
+        '',f"Не подготовлено числовых исходников: **{len(unresolved)}**.",
+        f"Для {report['unresolved_with_png_fallback']} из них сохранён отдельный PNG без числовых осей.",
         'Полный список исходных путей и причин — в `preparation_summary.json`.', '',
         'Новые ионограммы ожидают экспертной разметки. Приёмка автоматически не выполнялась.',
         'Старый пилот и история сохранены. Исходные LFS/HDF5 не изменялись.', '',
@@ -88,7 +98,7 @@ def verify(project, workers=4):
         'Результат разметки сохраняется в `datasets/<набор>/annotations`.',
         'Запуск каталога: `Start-Review.cmd`. Старый пилот: `Start-Pilot.cmd`.']
     (project/'reports'/'PREPARATION.md').write_text('\n'.join(lines)+'\n',encoding='utf8')
-    print(json.dumps({k:v for k,v in report.items() if k not in {'unresolved','integrity_errors'}},ensure_ascii=False,indent=2),flush=True)
+    print(json.dumps({k:v for k,v in report.items() if k not in {'unresolved','integrity_errors'}},ensure_ascii=True,indent=2),flush=True)
     return report
 
 

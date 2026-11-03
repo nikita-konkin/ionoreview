@@ -104,6 +104,17 @@ def test_colour_image_features_exclude_white_plot_margin():
     assert score[40, 30] > score[20, 30]
 
 
+def test_greyscale_feature_polarity_keeps_signal_above_background():
+    from PIL import Image,ImageDraw
+    from ionoreview.clustering import image_features
+    for background,signal in [('white','black'),('black','white')]:
+        image=Image.new('RGB',(80,60),background)
+        ImageDraw.Draw(image).line((10,30,70,30),fill=signal,width=3)
+        scores=image_features(image)
+        assert scores[0,0]==0
+        assert scores[30,40]>200
+
+
 def test_manual_regression_on_pilot_case_010():
     from pathlib import Path
     root=Path(__file__).resolve().parents[1]

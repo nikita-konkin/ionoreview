@@ -698,7 +698,7 @@ class Reviewer:
             ("\nДальность относительная!" if item.get("range_is_relative") else "") +
             ("\nОсь дальности из настроек приёма" if item.get("range_is_configured") else ""))
         if item.get("source_kind") == "image":
-            self.case_info.configure(text=f"{item['id']} · unassigned\n{item.get('original_name', '')}\n"
+            self.case_info.configure(text=f"{item['id']} · {item.get('split','unassigned')}\n{item.get('original_name', '')}\n"
                 f"{item['width']} × {item['height']} пикселей\nЧисловых осей нет")
         self.current_status.config(text=STATUS[doc["review"]["status"]])
         self.feedback.config(text="Исходник: " + Path(item["source"]).name)

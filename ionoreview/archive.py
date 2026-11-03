@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import warnings
+import zipfile
 
 import numpy as np
 from PIL import Image
@@ -139,6 +140,25 @@ def palette_image(db):
     return image
 
 
+def save_arrays(path, db, freq, ranges):
+    """Standard NPZ/NPY members, with lossless ZIP-LZMA compression.
+
+    numpy.load reads these directly. Fortran storage improves compression of
+    these range/frequency matrices without changing their shape or values.
+    """
+    path=Path(path)
+    temporary=path.with_suffix('.npz.tmp')
+    try:
+        with zipfile.ZipFile(temporary,'w',compression=zipfile.ZIP_LZMA) as archive:
+            arrays={'db':np.asfortranarray(db),'freq_mhz':freq,'range_km':ranges}
+            for name,array in arrays.items():
+                with archive.open(name+'.npy','w',force_zip64=True) as stream:
+                    np.lib.format.write_array(stream,array,allow_pickle=False)
+        temporary.replace(path)
+    finally:
+        if temporary.exists():temporary.unlink()
+
+
 def split_day(day):
     fixed={'2026-10-17':'train','2026-10-18':'validation','2026-10-24':'test'}
     if day in fixed: return fixed[day]
@@ -182,7 +202,7 @@ def prepare_record(record, dataset_root, hydration, phase):
             image_file=f'images/{ident}.png'; array_file=f'arrays/{ident}.npz'
             image_path=pack/image_file; array_path=pack/array_file
             palette_image(db).save(image_path,optimize=False)
-            np.savez_compressed(array_path,db=db,freq_mhz=freq,range_km=ranges)
+            save_arrays(array_path,db,freq,ranges)
             stat=path.stat(); cached=hydration.get(str(path),{})
             sha=(cached['sha256'] if cached.get('ok') and cached.get('size')==stat.st_size
                  and cached.get('mtime_ns')==stat.st_mtime_ns else digest(path))
@@ -197,7 +217,8 @@ def prepare_record(record, dataset_root, hydration, phase):
                 'range_is_configured':bool(getattr(ion.header,'range_is_configured',False)),
                 'warnings':[str(w.message) for w in notices],
                 'render':{'colormap':'turbo','vmin':15,'vmax':60,'matrix':'ion.db.T',
-                          'filters':'none','palette_png':True,'numeric_precision':'float32 lossless'},
+                          'filters':'none','palette_png':True,'numeric_precision':'float32',
+                          'array_compression':'ZIP-LZMA; standard numpy.load'},
                 'array_bytes':array_path.stat().st_size,'image_bytes':image_path.stat().st_size,
                 'strong_points_43db':int(np.count_nonzero(np.isfinite(db)&(db>=43))),
                 'processing_seconds':round(time.monotonic()-started,3)}
@@ -221,15 +242,18 @@ def write_manifests(dataset_root, pack_names, inventory):
         items=[read_json(p) for p in sorted((pack/'records').glob('*.json'))]
         if not items:continue
         times=sorted(i['when'] for i in items)
-        stations=sorted({i['tx']+' → '+i['rx'] for i in items})
+        stations=sorted({i['tx']+' → '+i['rx'] for i in items if i['tx'] or i['rx']})
+        kind=items[0]['source_kind']
         atomic_json(pack/'manifest.json',{'schema':'ionoreview/1','created_at':utcnow(),
-            'items':items,'annotation_policy':POLICY,'errors':[],
+            'items':items,'annotation_policy':POLICY if kind!='image' else
+                'Разметка в пикселях архивного PNG. Числовых осей нет; подписи и поля сохранены. Не размечайте подписи как сигнал.',
+            'errors':[],
             'sampling':'complete discovered archive batch; no signal-quality selection',
-            'source_root':inventory['root'],'numeric_precision':'float32, no quantization',
+            'source_root':inventory['root'],'numeric_precision':'float32, no quantization' if kind!='image' else None,
             'date_range':[times[0],times[-1]],'stations':stations,
             'split_policy':'whole UTC day, stable SHA256 buckets; pilot day overrides'})
-        kind=items[0]['source_kind']
-        kind_title={'chirp_h5':'ЛЧМ H5','digisonde_h5':'Digisonde H5','lfs':'ЛЧМ LFS'}[kind]
+        kind_title={'chirp_h5':'ЛЧМ H5','digisonde_h5':'Digisonde H5','lfs':'ЛЧМ LFS',
+                    'image':'PNG без числовых осей'}[kind]
         entries.append({'path':name,'title':f"{kind_title} · {name.rsplit('_',1)[-1]} · {times[0][:10]}…{times[-1][:10]}",
             'count':len(items),'date_range':[times[0],times[-1]],'stations':stations})
     pilot_entries=[e for e in entries if e['path']=='pilot']
