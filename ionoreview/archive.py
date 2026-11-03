@@ -241,6 +241,7 @@ def write_manifests(dataset_root, pack_names, inventory):
         pack=Path(dataset_root)/name
         items=[read_json(p) for p in sorted((pack/'records').glob('*.json'))]
         if not items:continue
+        items.sort(key=lambda i:(i['when'],i['tx'],i['rx'],i['id']))
         times=sorted(i['when'] for i in items)
         stations=sorted({i['tx']+' → '+i['rx'] for i in items if i['tx'] or i['rx']})
         kind=items[0]['source_kind']
