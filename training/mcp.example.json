@@ -1,9 +1,15 @@
 {
   "mcpServers": {
     "ionogram-training": {
-      "command": "C:/Users/VV/.t3/training-envs/ionoreview/Scripts/python.exe",
-      "args": ["-m", "ionoreview.finetune.mcp_server"],
-      "env": {"PYTHONPATH": "N:/ionoreview", "PYTHONUTF8": "1"}
+      "command": "<python-training>",
+      "args": [
+        "-m",
+        "ionoreview.finetune.mcp_server"
+      ],
+      "env": {
+        "PYTHONPATH": "<project-directory>",
+        "PYTHONUTF8": "1"
+      }
     }
   }
 }

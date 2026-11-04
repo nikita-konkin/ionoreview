@@ -268,6 +268,7 @@ def test_narrow_and_custom_ranges_use_physical_axis(reviewer):
     np.testing.assert_allclose(actual, [2800, 2700])
     assert app.range_low.get() == "2700.0"
     assert app.range_high.get() == "2800.0"
+    assert app.range_preset.get() == "Свое окно"
     app.range_preset.set("1500–2000")
     app.preset_range()
     actual = np.interp([app.view[1], app.view[3]], np.arange(len(app.ranges)), app.ranges)
@@ -280,6 +281,20 @@ def test_narrow_and_custom_ranges_use_physical_axis(reviewer):
     with pytest.raises(ValueError):
         app.set_range(8000, 9000)
     assert app.view == before
+    app.fit()
+    assert app.range_preset.get() == "Весь кадр"
+
+
+def test_blind_pack_blocks_all_automatic_annotation_entry_points(reviewer, monkeypatch):
+    app = reviewer
+    app.store.manifest['assistance_disabled'] = True
+    before = copy.deepcopy(app.document)
+    monkeypatch.setattr('ionoreview.app.filedialog.askopenfilename', lambda **kw: pytest.fail('Import opened'))
+    app.open_cluster_dialog()
+    app.import_candidate()
+    app.add_clusters()
+    assert app.cluster_window is None
+    assert app.document == before
 
 
 def test_region_zoom_preserves_polygons_and_can_be_cancelled(reviewer):

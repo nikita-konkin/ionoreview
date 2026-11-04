@@ -14,6 +14,8 @@ def config(path=None):
     for key in ['cache_dir','run_root','helper_root','dataset_root']:
         p=Path(os.path.expandvars(cfg[key])).expanduser()
         cfg[key]=str((PROJECT/p).resolve() if not p.is_absolute() else p.resolve())
+    if cfg.get('library_root'):
+        cfg['library_root']=str((PROJECT/Path(cfg['library_root']).expanduser()).resolve())
     return cfg
 
 

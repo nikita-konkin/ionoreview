@@ -101,6 +101,7 @@ def prepare_case(cfg,pack,case_id,folder):
             ident=f'{store.root.name}__{case_id}_x{x}_y{y}_w{w}_h{h}'
             image.crop((x,y,x+w,y+h)).save(folder/f'images/{ident}.png')
             row={'id':ident,'pack':store.root.name,'source_id':case_id,'roi':[x,y,w,h],
+                'when':item.get('when'),'tx':item.get('tx'),'rx':item.get('rx'),
                 'source_size':[image.width,image.height],'images':['images/overview.png',f'images/{ident}.png'],
                 'frequency_mhz':[float(f[x]),float(f[x+w-1])] if f is not None else None,
                 'range_km':[float(r[y]),float(r[y+h-1])] if r is not None else None}
@@ -129,3 +130,32 @@ def predict_case(cfg,pack,case_id,out,adapter=None):
     atomic_json(out/'proposal.labelme.json',proposal)
     return {'path':str(out/'proposal.labelme.json'),'polygons':len(shapes),'invalid_tiles':len(result['invalid']),
             'review_required':True,'annotations_modified':False}
+
+
+def predict_pack(cfg,pack,out,adapter=None):
+    """One model load for all blind test images. No annotations are read."""
+    from ..data import read_json
+    out=Path(out).resolve()
+    if out.exists():raise ValueError('Output directory already exists')
+    store=ReviewStore(pack);all_rows=[];items={}
+    for item in store.items:
+        source,examples=prepare_case(cfg,pack,item['id'],out/'inputs'/item['id'])
+        for row in examples:
+            row['images']=[str(Path('inputs')/item['id']/p) for p in row['images']]
+        all_rows.extend(examples);items[item['id']]=source
+    generate(cfg,out,all_rows,out/'tiles',adapter)
+    proposals=out/'proposals';proposals.mkdir()
+    shapes={key:[] for key in items};invalid={key:[] for key in items}
+    for row in all_rows:
+        pred=read_json(out/'tiles'/(row['id']+'.json'))
+        if pred['ok']:shapes[row['source_id']].extend(source_shapes(row,pred['prediction']))
+        else:invalid[row['source_id']].append(row['id'])
+    for ident,item in items.items():
+        validate_shapes(shapes[ident],item['width'],item['height'])
+        atomic_json(proposals/(ident+'.json'),{'version':'5.5.0','imageData':None,
+            'imagePath':str(safe_child(Path(pack),item['image'])),'imageWidth':item['width'],
+            'imageHeight':item['height'],'shapes':shapes[ident],
+            'flags':{'vlm_proposal':True,'incomplete':bool(invalid[ident])},
+            'proposal':{'invalid_tiles':invalid[ident],'review_required':True}})
+    return {'proposals':str(proposals),'images':len(items),'invalid_tiles':sum(map(len,invalid.values())),
+            'annotations_modified':False}

@@ -12,3 +12,6 @@ training/reports/
 training/local.json
 build/
 dist/
+experiments/
+deliverables/
+training/mcp.local.json

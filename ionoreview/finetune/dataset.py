@@ -13,7 +13,7 @@ from shapely.geometry import Polygon,box
 from ..data import ReviewStore,LABELS,atomic_json,digest,read_json,safe_child,utcnow
 from .common import PROJECT
 
-DATA_VERSION=5
+DATA_VERSION=6
 
 
 def polygon_parts(geometry):
@@ -65,7 +65,8 @@ def polygons_in_crop(shapes,roi,cfg):
 
 def instruction(row):
     meta={'crop_pixels':row['roi'],'full_image_pixels':row['source_size'],
-          'crop_frequency_MHz':row.get('frequency_mhz'),'crop_range_km_top_bottom':row.get('range_km')}
+          'crop_frequency_MHz':row.get('frequency_mhz'),'crop_range_km_top_bottom':row.get('range_km'),
+          'sounding_time_utc':row.get('when'),'transmitter':row.get('tx'),'receiver':row.get('rx')}
     return ('You annotate ionograms. Image 1 is the full overview; image 2 is the native-resolution crop. '
         'Return polygons ONLY for image 2. Coordinates are integers 0..1000: x increases right, y down; '
         '0 and 1000 correspond to the first and last pixel centers of the crop. '
@@ -109,7 +110,7 @@ def accepted_sources(library):
 
 
 def prepare(cfg,library=None):
-    sources=accepted_sources(library or PROJECT/'datasets')
+    sources=accepted_sources(library or cfg.get('library_root') or PROJECT/'datasets')
     signature={'version':DATA_VERSION,'sources':[{k:s[k] for k in ['pack','annotation_sha256']}|
         {'id':s['item']['id'],'image_sha256':s['item']['image_sha256'],'split':s['item']['split']} for s in sources],
         'options':{k:cfg[k] for k in ['tile_size','overlap','overview_edge','simplify_pixels','min_polygon_area']}}
@@ -158,6 +159,7 @@ def prepare(cfg,library=None):
                 tile_id=f'{ident}_x{x}_y{y}_w{w}_h{h}'
                 crop_path=f'images/{tile_id}.png';image.crop((x,y,x+w,y+h)).save(destination/crop_path)
                 row={'id':tile_id,'source_id':item['id'],'pack':source['pack'],
+                    'when':item.get('when'),'tx':item.get('tx'),'rx':item.get('rx'),
                     'split':split,'images':[overview_path,crop_path],'roi':[x,y,w,h],
                     'source_size':[image.width,image.height],'source_image_sha256':item['image_sha256'],
                     'annotation_sha256':source['annotation_sha256'],

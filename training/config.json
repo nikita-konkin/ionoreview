@@ -3,7 +3,7 @@
   "model_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
   "cache_dir": "~/.cache/ionoreview-training/hub",
   "run_root": "~/.cache/ionoreview-training/runs",
-  "helper_root": "N:/local_llm_helper",
+  "helper_root": "../local_llm_helper",
   "dataset_root": "training/data",
   "tile_size": 256,
   "overlap": 64,

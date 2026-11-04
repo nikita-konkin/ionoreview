@@ -18,6 +18,7 @@ def main(argv=None):
     train=sub.add_parser('train');train.add_argument('--name',required=True);train.add_argument('--max-steps',type=int);train.add_argument('--dataset',type=Path)
     pred=sub.add_parser('predict');pred.add_argument('--pack',required=True);pred.add_argument('--case',required=True);pred.add_argument('--out',type=Path,required=True);pred.add_argument('--adapter',type=Path)
     predict_set=sub.add_parser('predict-set');predict_set.add_argument('--dataset',type=Path);predict_set.add_argument('--split',choices=['validation','test'],default='validation');predict_set.add_argument('--out',type=Path,required=True);predict_set.add_argument('--adapter',type=Path)
+    pack_pred=sub.add_parser('predict-pack');pack_pred.add_argument('--pack-path',type=Path,required=True);pack_pred.add_argument('--out',type=Path,required=True);pack_pred.add_argument('--adapter',type=Path)
     evaluate=sub.add_parser('evaluate');evaluate.add_argument('--dataset',type=Path);evaluate.add_argument('--split',choices=['validation','test'],default='validation');evaluate.add_argument('--predictions',type=Path,required=True)
     merge=sub.add_parser('merge');merge.add_argument('--adapter',type=Path,required=True);merge.add_argument('--out',type=Path,required=True)
     args=parser.parse_args(argv);cfg=config(args.config)
@@ -45,6 +46,9 @@ def main(argv=None):
         elif args.command=='predict-set':
             from .predict import predict_split
             result=predict_split(cfg,args.dataset or latest_dataset(cfg),args.split,args.out,args.adapter)
+        elif args.command=='predict-pack':
+            from .predict import predict_pack
+            result=predict_pack(cfg,args.pack_path,args.out,args.adapter)
         elif args.command=='evaluate':
             from .evaluate import evaluate
             result=evaluate(args.dataset or latest_dataset(cfg),args.split,args.predictions)

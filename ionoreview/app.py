@@ -18,6 +18,7 @@ from matplotlib import colormaps
 from .data import LABELS, ReviewStore, atomic_json, digest, read_json, safe_child
 from .help import HELP_TEXT
 from .geometry import contains, intersects_rect
+from .theme import apply_theme,SURFACE,TEXT,MUTED,BORDER
 
 COLORS = {"Signal": "#47e1ae", "1E": "#ffd166", "1F": "#55c7ff",
           "2F": "#f5a1fa", "3F": "#b9a4ff", "E": "#ffeaa0", "Es": "#ffa965",
@@ -72,16 +73,11 @@ class Reviewer:
         self.cluster_generation = 0
         self.cluster_busy = False
         self.root.title("ИоноРазметка — экспертная приёмка")
-        self.root.geometry("1360x880")
-        self.root.minsize(1020, 700)
-        self.root.configure(bg="#17212c")
-        style = ttk.Style(root)
-        style.theme_use("clam")
-        style.configure(".", font=("Segoe UI", 10))
-        style.configure("TFrame", background="#edf1f5")
-        style.configure("TLabel", background="#edf1f5", foreground="#213144")
-        style.configure("TButton", padding=(8, 5))
-        style.configure("Title.TLabel", font=("Segoe UI", 13, "bold"))
+        width=min(1520,max(1020,self.root.winfo_screenwidth()-100))
+        height=min(1000,max(720,self.root.winfo_screenheight()-100))
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(1020,720)
+        apply_theme(root)
         self.reviewer = tk.StringVar()
         settings = self.store.root / "settings.json"
         preferences = {}
@@ -103,12 +99,14 @@ class Reviewer:
         self.show_proposal = tk.BooleanVar(value=False)
         self.range_low = tk.StringVar(value="1000")
         self.range_high = tk.StringVar(value="5000")
-        self.range_preset = tk.StringVar(value="1000–5000")
+        self.range_preset = tk.StringVar(value="Весь кадр")
+        self.path_details=tk.BooleanVar(value=False)
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Control-s>", lambda e: self.save())
         self.root.bind("<Control-z>", self.undo_shortcut)
         self.root.bind("<Control-Return>", lambda e: self.decide("accepted"))
+        self.root.bind("<Control-o>",lambda e:self.open_folder())
         self.root.bind("<Escape>", lambda e: self.cancel_polygon())
         self.root.bind("<Return>", self.enter)
         self.canvas.bind("<Delete>", lambda e: self.delete_shape())
@@ -121,16 +119,26 @@ class Reviewer:
         self.load(initial)
 
     def _build(self):
-        top = ttk.Frame(self.root, padding=(14, 10))
+        top = ttk.Frame(self.root, padding=(18, 12))
         top.pack(fill="x")
         ttk.Label(top, text="ИоноРазметка", style="Title.TLabel").pack(side="left")
-        self.progress = ttk.Label(top, text="")
-        self.progress.pack(side="left", padx=20)
-        ttk.Button(top, text="Экспорт принятых…", command=self.export).pack(side="right")
-        ttk.Button(top, text="Правила", command=self.policy).pack(side="right", padx=6)
-        ttk.Button(top, text="Открыть папку…", command=self.open_folder).pack(side="right", padx=6)
-        ttk.Button(top, text="Каталог…", command=self.open_library).pack(side="right", padx=6)
-        ttk.Button(top, text="Сохранить набор как…", command=self.save_pack_as).pack(side="right", padx=6)
+        self.progress = ttk.Label(top, text="",style='Muted.TLabel')
+        self.progress.pack(side="left", padx=(22,10))
+        self.overall_progress=ttk.Progressbar(top,length=110,maximum=100)
+        self.overall_progress.pack(side='left')
+        ttk.Button(top,text='Правила',command=self.policy).pack(side='right')
+        file_button=ttk.Menubutton(top,text='Файл ▾')
+        menu=tk.Menu(file_button,tearoff=False,font=('Segoe UI',10))
+        menu.add_command(label='Открыть папку…',accelerator='Ctrl+O',command=self.open_folder)
+        menu.add_command(label='Каталог…',command=self.open_library)
+        menu.add_separator()
+        menu.add_command(label='Сохранить набор как…',command=self.save_pack_as)
+        menu.add_command(label='Импорт разметки LabelMe…',command=self.import_candidate,
+                         state='disabled' if self.store.manifest.get('assistance_disabled') else 'normal')
+        menu.add_command(label='Экспорт принятых…',command=self.export)
+        file_button.configure(menu=menu);file_button.pack(side='right',padx=8)
+        ttk.Button(top,text='Каталог…',command=self.open_library).pack(side='right',padx=3)
+        ttk.Separator(self.root).pack(fill='x')
         body = ttk.Panedwindow(self.root, orient="horizontal")
         body.pack(fill="both", expand=True)
         self.left_shell = ttk.Frame(body, width=310)
@@ -139,7 +147,7 @@ class Reviewer:
         actions.pack(side="bottom", fill="x")
         left_scroll = ttk.Scrollbar(self.left_shell, orient="vertical")
         left_scroll.pack(side="right", fill="y")
-        self.left_canvas = tk.Canvas(self.left_shell, width=300, bg="#edf1f5",
+        self.left_canvas = tk.Canvas(self.left_shell, width=300, bg=SURFACE,
                                      highlightthickness=0, yscrollcommand=left_scroll.set)
         self.left_canvas.pack(fill="both", expand=True)
         left_scroll.config(command=self.left_canvas.yview)
@@ -162,20 +170,22 @@ class Reviewer:
                     self.left_canvas.yview_moveto(0)
                 return "break"
         self.root.bind("<MouseWheel>", scroll_form, add="+")
-        ttk.Label(self.left, text="Изображения").pack(anchor="w")
+        ttk.Label(self.left, text="ИОНОГРАММЫ",style='Section.TLabel').pack(anchor="w")
         self.cases = tk.Listbox(self.left, width=31, height=5, exportselection=False,
-                                font=("Segoe UI", 10), selectbackground="#315e86", activestyle="none")
+                                font=("Segoe UI", 10),bg=SURFACE,fg=TEXT,borderwidth=0,highlightthickness=1,
+                                highlightbackground=BORDER,selectbackground='#e7efff',selectforeground='#1d4ed8',activestyle="none")
         self.cases.pack(fill="x", pady=(5, 10))
         self.cases.bind("<<ListboxSelect>>", self.choose_case)
         ttk.Label(self.left, text="Эксперт").pack(anchor="w")
         ttk.Entry(self.left, textvariable=self.reviewer).pack(fill="x", pady=(3, 8))
-        self.case_info = ttk.Label(self.left, wraplength=270, justify="left")
+        self.case_info = ttk.Label(self.left, wraplength=270, justify="left",style='Muted.TLabel',font=('Segoe UI',9))
         self.case_info.pack(fill="x", pady=5)
         self.current_status = ttk.Label(self.left, font=("Segoe UI", 11, "bold"))
         self.current_status.pack(anchor="w", pady=7)
-        ttk.Label(self.left, text="Объекты").pack(anchor="w")
+        ttk.Label(self.left, text="ОБЪЕКТЫ",style='Section.TLabel').pack(anchor="w")
         self.objects = tk.Listbox(self.left, height=4, exportselection=False, selectmode="extended",
-                                  selectbackground="#315e86", font=("Segoe UI", 10))
+                                  bg=SURFACE,fg=TEXT,borderwidth=0,highlightthickness=1,highlightbackground=BORDER,
+                                  selectbackground='#e7efff',selectforeground='#1d4ed8',font=("Segoe UI", 10))
         self.objects.pack(fill="x", pady=4)
         self.objects.bind("<<ListboxSelect>>", self.choose_object)
         row = ttk.Frame(self.left)
@@ -184,7 +194,7 @@ class Reviewer:
         ttk.Button(row, text="Сменить класс", command=self.relabel).pack(side="right")
         row = ttk.Frame(self.left)
         row.pack(fill="x", pady=3)
-        ttk.Button(row, text="Удалить", command=self.delete_shape).pack(side="left")
+        ttk.Button(row, text="Удалить", command=self.delete_shape,style='Danger.TButton').pack(side="left")
         ttk.Button(row, text="Группа…", command=self.group).pack(side="left", padx=4)
         ttk.Button(row, text="Отмена", command=self.undo).pack(side="right")
         ttk.Checkbutton(self.left, text="При переносе двигать всю группу", variable=self.move_group).pack(anchor="w", pady=4)
@@ -192,22 +202,27 @@ class Reviewer:
                         command=self.changed).pack(anchor="w", pady=8)
         ttk.Label(self.left, text="Замечание эксперта").pack(anchor="w")
         self.note = tk.Text(self.left, width=28, height=3, wrap="word", font=("Segoe UI", 10), undo=True)
+        self.note.configure(bg=SURFACE,fg=TEXT,relief='flat',highlightthickness=1,highlightbackground=BORDER,
+                            highlightcolor='#2563eb',padx=7,pady=6)
         self.note.pack(fill="x", pady=4)
         self.note.bind("<<Modified>>", self.note_modified)
         for text, status in (("Принять и далее   Ctrl+Enter", "accepted"),
                              ("На исправление и далее", "changes"),
                              ("Неоднозначно и далее", "ambiguous")):
-            ttk.Button(actions, text=text, command=lambda s=status: self.decide(s)).pack(fill="x", pady=3)
-        ttk.Button(actions, text="Импорт разметки LabelMe…", command=self.import_candidate).pack(fill="x", pady=(9, 0))
+            ttk.Button(actions, text=text,style='Primary.TButton' if status=='accepted' else 'TButton',
+                       command=lambda s=status: self.decide(s)).pack(fill="x", pady=3)
+        self.import_button=ttk.Button(actions, text="Импорт разметки LabelMe…", command=self.import_candidate,
+            state='disabled' if self.store.manifest.get('assistance_disabled') else 'normal')
+        self.import_button.pack(fill="x", pady=(9, 0))
 
         right = ttk.Frame(body)
         body.add(right, weight=1)
         toolbar = ttk.Frame(right, padding=(8, 6))
         toolbar.pack(fill="x")
-        ttk.Radiobutton(toolbar, text="Выбор / вершины", variable=self.tool, value="select").pack(side="left")
-        ttk.Radiobutton(toolbar, text="Полигон", variable=self.tool, value="draw").pack(side="left", padx=8)
-        ttk.Radiobutton(toolbar, text="Область", variable=self.tool, value="region").pack(side="left")
-        ttk.Radiobutton(toolbar, text="Выделение", variable=self.tool, value="multi").pack(side="left", padx=4)
+        ttk.Radiobutton(toolbar, text="Выбор / вершины", variable=self.tool, value="select",style='Tool.TRadiobutton').pack(side="left")
+        ttk.Radiobutton(toolbar, text="Полигон", variable=self.tool, value="draw",style='Tool.TRadiobutton').pack(side="left", padx=3)
+        ttk.Radiobutton(toolbar, text="Область", variable=self.tool, value="region",style='Tool.TRadiobutton').pack(side="left")
+        ttk.Radiobutton(toolbar, text="Выделение", variable=self.tool, value="multi",style='Tool.TRadiobutton').pack(side="left", padx=3)
         ttk.Button(toolbar, text="Замкнуть", command=self.finish_polygon).pack(side="left")
         self.undo_point_button = ttk.Button(toolbar, text="Убрать точку",
                                              command=self.remove_last_point, state="disabled")
@@ -240,7 +255,7 @@ class Reviewer:
         self.range_controls = (low_entry, high_entry, range_button, presets)
         auto = ttk.Frame(right, padding=(8, 0, 8, 5))
         auto.pack(fill="x")
-        self.cluster_button = ttk.Button(auto, text="Авторазметка…", command=self.open_cluster_dialog)
+        self.cluster_button = ttk.Button(auto, text="Авторазметка…", command=self.open_cluster_dialog,style='Primary.TButton')
         self.cluster_button.pack(side="left")
         self.add_clusters_button = ttk.Button(auto, text="Добавить кластеры", command=self.add_clusters, state="disabled")
         self.add_clusters_button.pack(side="left", padx=4)
@@ -278,30 +293,38 @@ class Reviewer:
         ttk.Scale(contrasts, from_=0, to=.65, variable=self.opacity, length=90, command=lambda v: self.schedule_draw()).pack(side="left")
         self.cursor_text = ttk.Label(contrasts, text="", width=30, anchor="e")
         self.cursor_text.pack(side="right")
-        self.help_text = ttk.Label(right, text="Внутри маски — перенос целиком, белые точки — вершины. Backspace — убрать новую точку.\n"
-                  "Колесо — масштаб графика, средняя кнопка — сдвиг. Esc — отмена.", padding=(8, 4))
+        self.help_text = ttk.Label(right, text="Колесо — масштаб  ·  Средняя кнопка — сдвиг  ·  Ctrl+Z — отмена  ·  Backspace — убрать точку  ·  Esc — отменить полигон",style='Muted.TLabel',font=('Segoe UI',9),padding=(8,4))
         self.help_text.pack(fill="x")
         bottom = ttk.Frame(self.root, padding=8)
         bottom.pack(side="bottom", fill="x", before=body)
         ttk.Button(bottom, text="← Назад", command=lambda: self.navigate(-1)).pack(side="left")
         ttk.Button(bottom, text="Далее →", command=lambda: self.navigate(1)).pack(side="left", padx=5)
         ttk.Button(bottom, text="Сохранить   Ctrl+S", command=self.save).pack(side="left")
-        self.feedback = ttk.Label(bottom, text="", width=75)
+        ttk.Button(bottom,text='Все пути ▾',command=self.toggle_paths).pack(side='right')
+        self.feedback = ttk.Label(bottom, text="", width=35,style='Muted.TLabel')
         self.feedback.pack(side="left", padx=14, fill="x", expand=True)
         paths = ttk.Frame(self.root, padding=(8, 3))
         paths.pack(side="bottom", fill="x", before=body)
         paths.columnconfigure(1, weight=1)
+        self.extra_path_widgets=[]
         for row, (label, variable) in enumerate((
-            ("Исходник", self.source_path), ("PNG для разметки", self.image_path),
-            ("Результат JSON", self.result_path), ("Последний экспорт", self.export_path)
+            ("PNG для разметки", self.image_path), ("Результат JSON", self.result_path),
+            ("Исходник", self.source_path), ("Последний экспорт", self.export_path)
         )):
-            ttk.Label(paths, text=label, width=18).grid(row=row, column=0, sticky="w", pady=1)
-            ttk.Entry(paths, textvariable=variable, state="readonly").grid(row=row, column=1, sticky="ew", padx=6, pady=1)
-            ttk.Button(paths, text="Копировать", padding=(5, 1),
-                       command=lambda value=variable: self.copy_path(value)).grid(row=row, column=2, pady=1)
-            ttk.Button(paths, text="Открыть папку", padding=(5, 1),
-                       command=lambda value=variable: self.open_path_folder(value)).grid(row=row, column=3, padx=(4, 0), pady=1)
+            widgets=[ttk.Label(paths,text=label,width=18,style='Muted.TLabel',font=('Segoe UI',9)),
+                ttk.Entry(paths,textvariable=variable,state='readonly',font=('Segoe UI',9)),
+                ttk.Button(paths,text='Копировать',padding=(5,1),command=lambda value=variable:self.copy_path(value)),
+                ttk.Button(paths,text='Открыть папку',padding=(5,1),command=lambda value=variable:self.open_path_folder(value))]
+            for column,widget in enumerate(widgets):
+                widget.grid(row=row,column=column,sticky='ew' if column==1 else 'w',padx=3,pady=2)
+                if row>=2:widget.grid_remove();self.extra_path_widgets.append(widget)
         self.refresh_cases()
+
+    def toggle_paths(self):
+        self.path_details.set(not self.path_details.get())
+        for widget in self.extra_path_widgets:
+            if self.path_details.get():widget.grid()
+            else:widget.grid_remove()
 
     def policy(self):
         if self.help_window is not None and self.help_window.winfo_exists():
@@ -330,6 +353,9 @@ class Reviewer:
         window.geometry(f"{width}x{height}{x:+d}{y:+d}")
 
     def open_cluster_dialog(self):
+        if self.store.manifest.get('assistance_disabled'):
+            self.feedback.configure(text='Независимая разметка: автоматические подсказки отключены')
+            return
         if self.cluster_window is not None and self.cluster_window.winfo_exists():
             self.cluster_window.lift()
             return
@@ -461,6 +487,9 @@ class Reviewer:
         self.redraw()
 
     def add_clusters(self):
+        if self.store.manifest.get('assistance_disabled'):
+            self.feedback.configure(text="В независимом тесте автоматические подсказки отключены")
+            return
         if self.cluster_result is None or not self.cluster_result.shapes:
             return
         existing = {tuple(tuple(p) for p in s["points"]) for s in self.document["shapes"]}
@@ -595,6 +624,7 @@ class Reviewer:
         self.cases.selection_set(self.index)
         self.cases.see(self.index)
         self.progress.config(text=f"Принято {accepted} из {len(self.store.items)}")
+        self.overall_progress.configure(value=100*accepted/max(1,len(self.store.items)))
         self.loading = False
 
     def collect(self):
@@ -608,6 +638,7 @@ class Reviewer:
         self.document["review"]["status"] = "pending"
         self.current_status.config(text="Ожидает · есть изменения")
         self.feedback.config(text="Правки сохранятся при переходе или Ctrl+S")
+        self.current_status.configure(style='Pending.TLabel')
 
     def note_modified(self, event=None):
         if self.note.edit_modified():
@@ -701,6 +732,11 @@ class Reviewer:
             self.case_info.configure(text=f"{item['id']} · {item.get('split','unassigned')}\n{item.get('original_name', '')}\n"
                 f"{item['width']} × {item['height']} пикселей\nЧисловых осей нет")
         self.current_status.config(text=STATUS[doc["review"]["status"]])
+        styles={'pending':'Pending.TLabel','accepted':'Accepted.TLabel','changes':'Changes.TLabel','ambiguous':'Ambiguous.TLabel'}
+        self.current_status.configure(style=styles[doc['review']['status']])
+        self.cluster_button.configure(state='disabled' if self.store.manifest.get('assistance_disabled') else 'normal')
+        if self.store.manifest.get('assistance_disabled'):
+            self.cluster_summary.configure(text='Независимый тест: без автоматических подсказок')
         self.feedback.config(text="Исходник: " + Path(item["source"]).name)
         self.cases.selection_clear(0, "end")
         self.cases.selection_set(index)
@@ -1165,10 +1201,13 @@ class Reviewer:
         self.set_range(1000, 5000)
 
     def sync_range_fields(self):
+        self.range_preset.set("Свое окно")
         if self.ranges is not None and self.view is not None:
             values = np.interp([self.view[1], self.view[3]], np.arange(len(self.ranges)), self.ranges)
             self.range_low.set(f"{min(values):.1f}")
             self.range_high.set(f"{max(values):.1f}")
+        if self.item and self.view == (0, 0, self.item["width"] - 1, self.item["height"] - 1):
+            self.range_preset.set("Весь кадр")
 
     def set_range(self, low, high):
         if self.ranges is None:
@@ -1195,8 +1234,10 @@ class Reviewer:
         return "break"
 
     def preset_range(self, event=None):
-        self.range_low.set(str(RANGE_PRESETS[self.range_preset.get()][0]))
-        self.range_high.set(str(RANGE_PRESETS[self.range_preset.get()][1]))
+        name = self.range_preset.get()
+        low, high = RANGE_PRESETS[name]
+        self.range_low.set(str(low))
+        self.range_high.set(str(high))
         return self.apply_range()
 
     def focus_masks(self):
@@ -1337,6 +1378,9 @@ class Reviewer:
             self.canvas.create_text(r, 10, anchor="e", text=f"{self.low.get():.0f}–{max(self.low.get()+1,self.high.get()):.0f} дБ · turbo", fill="#dbe6f1")
 
     def import_candidate(self):
+        if self.store.manifest.get('assistance_disabled'):
+            self.feedback.configure(text='Независимая разметка: импорт подсказок отключён')
+            return
         if (self.dirty or self.vertices) and not self.save():
             return
         path = filedialog.askopenfilename(title="Кандидат LabelMe для текущего изображения", filetypes=[("LabelMe JSON", "*.json")])
