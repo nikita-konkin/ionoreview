@@ -60,3 +60,11 @@ jobs:
             ${{ runner.temp }}/ionoreview-build/frozen-self-test.json
           if-no-files-found: error
           retention-days: 30
+      - name: Upload failed executable self-test
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: IonoReview-build-diagnostics-${{ github.sha }}
+          path: ${{ runner.temp }}/ionoreview-build/frozen-self-test.json
+          if-no-files-found: warn
+          retention-days: 7

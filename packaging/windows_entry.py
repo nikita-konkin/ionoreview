@@ -111,7 +111,10 @@ def self_test(report_path):
     from ionoreview import __version__
 
     with tempfile.TemporaryDirectory(prefix="ionoreview-selftest-") as temp:
-        pack = Path(temp) / "pack"
+        # Windows CI can supply TEMP through an 8.3 alias or a junction.
+        # Pack resolution returns canonical paths, so compare canonical roots.
+        temporary_root = Path(temp).resolve()
+        pack = temporary_root / "pack"
         (pack / "images").mkdir(parents=True)
         (pack / "arrays").mkdir()
         db = np.full((80, 100), 20, dtype=np.float32)
@@ -149,7 +152,7 @@ def self_test(report_path):
         annotation_hash = digest(store.path(item))
         for part in ('images', 'arrays', 'annotations'):
             assert resolve_pack_folder(pack / part) == pack
-        wrapper = Path(temp) / 'delivery'
+        wrapper = temporary_root / 'delivery'
         other_pack = copy_pack(pack, wrapper / 'dataset')
         assert resolve_pack_folder(wrapper) == other_pack
         root = tk.Tk()

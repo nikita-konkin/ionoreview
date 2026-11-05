@@ -25,7 +25,12 @@ if (-not $process.WaitForExit(120000)) {
     $process.Kill()
     throw "Frozen self-test did not exit within 120 seconds"
 }
-if ($process.ExitCode -ne 0) { throw "Frozen self-test failed with exit code $($process.ExitCode). See $report" }
+if ($process.ExitCode -ne 0) {
+    if (Test-Path -LiteralPath $report) {
+        Get-Content -LiteralPath $report -Raw | Write-Output
+    }
+    throw "Frozen self-test failed with exit code $($process.ExitCode). See $report"
+}
 $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
 if (-not $result.ok -or -not $result.frozen) { throw "Frozen self-test report is invalid" }
 # Ensure accidental imports cannot silently turn the reviewer into a CUDA/LLM distribution.
