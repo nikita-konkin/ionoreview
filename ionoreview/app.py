@@ -15,6 +15,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 from matplotlib import colormaps
 
+from . import __version__
 from .data import LABELS, ReviewStore, atomic_json, digest, read_json, safe_child
 from .help import HELP_TEXT
 from .geometry import contains, intersects_rect
@@ -72,7 +73,7 @@ class Reviewer:
         self.cluster_result = None
         self.cluster_generation = 0
         self.cluster_busy = False
-        self.root.title("ИоноРазметка — экспертная приёмка")
+        self.root.title(f"ИоноРазметка v{__version__} — экспертная приёмка")
         width=min(1520,max(1020,self.root.winfo_screenwidth()-100))
         height=min(1000,max(720,self.root.winfo_screenheight()-100))
         self.root.geometry(f"{width}x{height}")
@@ -138,6 +139,7 @@ class Reviewer:
         menu.add_command(label='Экспорт принятых…',command=self.export)
         file_button.configure(menu=menu);file_button.pack(side='right',padx=8)
         ttk.Button(top,text='Каталог…',command=self.open_library).pack(side='right',padx=3)
+        ttk.Button(top,text='Открыть папку…',command=self.open_folder).pack(side='right',padx=3)
         ttk.Separator(self.root).pack(fill='x')
         body = ttk.Panedwindow(self.root, orient="horizontal")
         body.pack(fill="both", expand=True)
@@ -556,7 +558,8 @@ class Reviewer:
     def open_folder(self):
         if (self.dirty or self.vertices) and not self.save():
             return
-        folder = filedialog.askdirectory(title="Папка изображений или готовый набор с manifest.json")
+        folder = filedialog.askdirectory(parent=self.root, initialdir=str(self.store.root),
+                                        title="Открыть набор, папку images/annotations или папку изображений")
         if not folder:
             return
         try:
@@ -564,11 +567,13 @@ class Reviewer:
             if (folder/'catalog.json').is_file():
                 self.open_library(folder)
                 return
-            if (folder / "manifest.json").is_file():
-                self.switch_pack(folder)
+            from .folders import resolve_pack_folder, require_image_files, import_image_folder, unique_folder
+            pack_folder = resolve_pack_folder(folder)
+            if pack_folder is not None:
+                self.switch_pack(pack_folder)
                 return
-            from .folders import import_image_folder, unique_folder
-            parent = filedialog.askdirectory(title="Где создать рабочую папку с PNG и разметкой?")
+            require_image_files(folder)
+            parent = filedialog.askdirectory(parent=self.root, title="Где создать рабочую папку с PNG и разметкой?")
             if not parent:
                 return
             self.root.configure(cursor="watch")

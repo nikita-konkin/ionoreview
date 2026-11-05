@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -41,7 +42,16 @@ def atomic_json(path, value):
             json.dump(value, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, path)
+        # Windows readers/antivirus can briefly deny replacement of an open file.
+        # Retain atomic replacement and the previous valid document while retrying.
+        for attempt in range(12):
+            try:
+                os.replace(temp, path)
+                break
+            except PermissionError as exc:
+                if getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == 11:
+                    raise
+                time.sleep(min(0.01 * 2 ** attempt, 0.25))
     finally:
         temp.unlink(missing_ok=True)
 

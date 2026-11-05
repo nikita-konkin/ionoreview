@@ -10,6 +10,37 @@ import pytest
 from ionoreview.data import ReviewStore, atomic_json, digest, validate_shapes
 
 
+def test_atomic_json_retries_windows_reader_lock_without_losing_old_file(tmp_path,monkeypatch):
+    import ionoreview.data as data
+    path=tmp_path/'progress.json';atomic_json(path,{'step':1})
+    replace=data.os.replace;attempts=[]
+    def blocked_then_replace(source,target):
+        attempts.append(1)
+        assert data.read_json(path)=={'step':1}
+        if len(attempts)<3:
+            exc=PermissionError('Windows reader has the destination open');exc.winerror=5
+            raise exc
+        return replace(source,target)
+    monkeypatch.setattr(data.os,'replace',blocked_then_replace)
+    monkeypatch.setattr(data.time,'sleep',lambda _:None)
+    atomic_json(path,{'step':2})
+    assert data.read_json(path)=={'step':2} and len(attempts)==3
+    assert not list(tmp_path.glob('*.tmp'))
+
+
+def test_atomic_json_permanent_denial_keeps_previous_file_and_reports_failure(tmp_path,monkeypatch):
+    import ionoreview.data as data
+    path=tmp_path/'progress.json';atomic_json(path,{'step':1})
+    def denied(*args):
+        exc=PermissionError('Permanent denial');exc.winerror=5
+        raise exc
+    monkeypatch.setattr(data.os,'replace',denied)
+    monkeypatch.setattr(data.time,'sleep',lambda _:None)
+    with pytest.raises(PermissionError):atomic_json(path,{'step':2})
+    assert data.read_json(path)=={'step':1}
+    assert not list(tmp_path.glob('*.tmp'))
+
+
 @pytest.fixture
 def pack(tmp_path):
     root = tmp_path / "pack"
@@ -469,6 +500,61 @@ def test_open_image_folder_switches_pack_and_disables_km_fields(reviewer, tmp_pa
     assert app.source_path.get()==str(source/'one.jpg')
     assert all(str(w.cget('state'))=='disabled' for w in app.range_controls)
     assert app.store.path(app.item).parent.name=='annotations'
+
+
+def test_open_annotations_subfolder_keeps_images_axes_and_existing_labels(reviewer, pack, tmp_path, monkeypatch):
+    from ionoreview.folders import copy_pack
+    destination = copy_pack(pack.root, tmp_path/'student_return')
+    store = ReviewStore(destination)
+    item = store.items[0]
+    document = store.blank(item)
+    document['shapes'] = [dict(polygon(), label='1F')]
+    document['review'].update(status='accepted', reviewer='Student')
+    store.save(item, document)
+    before = digest(store.path(item))
+    selections = []
+    def choose(**kwargs):
+        selections.append(kwargs)
+        return str(destination/'annotations')
+    monkeypatch.setattr('ionoreview.app.filedialog.askdirectory', choose)
+    monkeypatch.setattr('ionoreview.app.messagebox.showerror', lambda *a,**kw: pytest.fail(str(a)))
+    reviewer.open_folder()
+    reviewer.root.update()
+    assert len(selections) == 1
+    assert reviewer.store.root == destination
+    assert reviewer.document['shapes'][0]['label'] == '1F'
+    assert reviewer.db is not None
+    assert digest(store.path(item)) == before
+
+
+def test_folder_wrapper_resolves_dataset_but_rejects_ambiguous_splits(pack, tmp_path):
+    from ionoreview.folders import copy_pack, resolve_pack_folder
+    wrapper = tmp_path/'delivery'
+    destination = copy_pack(pack.root, wrapper/'dataset')
+    assert resolve_pack_folder(wrapper) == destination
+    assert resolve_pack_folder(destination/'arrays') == destination
+    other = tmp_path/'multiple'
+    copy_pack(pack.root, other/'train')
+    copy_pack(pack.root, other/'test')
+    with pytest.raises(ValueError, match='несколько наборов'):
+        resolve_pack_folder(other)
+
+
+def test_catalog_can_open_returned_student_folder_outside_catalog(pack, tmp_path, tk_root, monkeypatch):
+    from tkinter import ttk
+    from ionoreview.library import choose
+    atomic_json(tmp_path/'catalog.json', {'schema':'ionoreview-library/1','datasets':[]})
+    monkeypatch.setattr('ionoreview.library.filedialog.askdirectory', lambda **kw: str(pack.root/'arrays'))
+    monkeypatch.setattr('ionoreview.library.messagebox.showerror', lambda *a,**kw: pytest.fail(str(a)))
+    def select_other():
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+        window = next(w for w in tk_root.winfo_children() if isinstance(w,tk.Toplevel))
+        next(w for w in descendants(window) if isinstance(w,ttk.Button) and w.cget('text')=='Открыть другую папку…').invoke()
+    tk_root.after(50, select_other)
+    assert choose(tk_root,tmp_path) == pack.root
 
 
 def test_clustering_worker_returns_pixel_candidates_without_touching_annotations(reviewer, tmp_path):

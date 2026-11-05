@@ -30,7 +30,8 @@ def main():
         run_library(args.folder)
     elif args.command == "review":
         from .app import run
-        run(args.pack)
+        from .folders import resolve_pack_folder
+        run(resolve_pack_folder(args.pack) or args.pack)
     elif args.command == "prepare":
         from .prepare import prepare as build
         build(args.files, args.out, args.project, tuple(args.gate))

@@ -10,6 +10,34 @@ from .data import ReviewStore, atomic_json, digest, utcnow
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
 
+def resolve_pack_folder(source):
+    """Accept a pack, its data subfolder, or an unambiguous delivery wrapper."""
+    source = Path(source).resolve()
+    if not source.is_dir():
+        raise ValueError("Папка не найдена")
+    if (source / "manifest.json").is_file():
+        return source
+    if source.name.casefold() in {"images", "arrays", "annotations"} and (source.parent / "manifest.json").is_file():
+        return source.parent
+    candidates = [source / name for name in
+                  ("dataset", "test-student", "student-reference", "review-pack", "train", "validation", "test")
+                  if (source / name / "manifest.json").is_file()]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise ValueError("В папке несколько наборов. Выберите нужную вложенную папку с manifest.json")
+    return None
+
+
+def require_image_files(source):
+    source = Path(source)
+    if any(p.is_file() and p.suffix.casefold() in IMAGE_SUFFIXES for p in source.iterdir()):
+        return
+    if any(p.is_file() and p.suffix.casefold() == ".json" for p in source.iterdir()):
+        raise ValueError("В папке только JSON-разметка, без изображений. Откройте полный набор с manifest.json, images и annotations. Отдельные JSON можно импортировать в соответствующий набор через меню Файл.")
+    raise ValueError("В папке нет PNG, JPEG, BMP или TIFF и не найден готовый набор с manifest.json")
+
+
 def import_image_folder(source, destination):
     source, destination = Path(source).resolve(), Path(destination).resolve()
     files = sorted(p for p in source.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)

@@ -1,7 +1,7 @@
 """Searchable local catalog of portable annotation packs."""
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog, messagebox
 
 from .data import read_json, safe_child
 
@@ -74,11 +74,32 @@ def choose(root, library):
         if indices:
             selected.append(filtered[int(indices[0])]['full_path'])
             window.destroy()
+    def open_folder():
+        from .folders import resolve_pack_folder, require_image_files, import_image_folder, unique_folder
+        folder = filedialog.askdirectory(parent=window, initialdir=str(library),
+                                         title='Выберите другой набор или папку изображений')
+        if not folder:
+            return
+        try:
+            destination = resolve_pack_folder(folder)
+            if destination is None:
+                require_image_files(folder)
+                parent = filedialog.askdirectory(parent=window, title='Где создать рабочую папку с PNG и разметкой?')
+                if not parent:
+                    return
+                destination = import_image_folder(folder, unique_folder(parent, 'images'))
+            from .data import ReviewStore
+            ReviewStore(destination)
+            selected.append(destination)
+            window.destroy()
+        except Exception as exc:
+            messagebox.showerror('Не удалось открыть папку', str(exc), parent=window)
     listing.bind('<<TreeviewSelect>>',selection)
     listing.bind('<Double-Button-1>',open_pack)
     listing.bind('<Return>',open_pack)
     open_button=ttk.Button(frame,text='Открыть набор',command=open_pack,style='Primary.TButton')
     open_button.pack(side='left',pady=(12,0))
+    ttk.Button(frame,text='Открыть другую папку…',command=open_folder).pack(side='left',padx=12,pady=(12,0))
     ttk.Button(frame,text='Отмена',command=window.destroy).pack(side='right')
     query.trace_add('write',update)
     update();entry.focus_set()

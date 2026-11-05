@@ -39,6 +39,7 @@ def launch(folder):
     from tkinter import filedialog, messagebox
     from ionoreview.app import Reviewer
     from ionoreview.library import choose
+    from ionoreview.folders import resolve_pack_folder, require_image_files, import_image_folder, unique_folder
 
     root = tk.Tk()
     root.withdraw()
@@ -64,25 +65,26 @@ def launch(folder):
                     root.destroy()
                     return 0
                 break
-            if (destination / "manifest.json").is_file():
-                if (destination.parent / "catalog.json").is_file():
-                    library_root = destination.parent
-                break
+            if destination.is_dir():
+                try:
+                    pack = resolve_pack_folder(destination)
+                    if pack is not None:
+                        destination = pack
+                        if (destination.parent / "catalog.json").is_file():
+                            library_root = destination.parent
+                        break
+                    require_image_files(destination)
+                    output = filedialog.askdirectory(parent=root, title="Где создать рабочий набор и сохранять разметку?")
+                    if output:
+                        destination = import_image_folder(destination, unique_folder(output, "images"))
+                        break
+                except ValueError as exc:
+                    messagebox.showinfo("ИоноРазметка", str(exc), parent=root)
             selected = filedialog.askdirectory(parent=root, title="Выберите набор, каталог или папку изображений")
             if not selected:
                 root.destroy()
                 return 0
             destination = Path(selected)
-            if (destination / "manifest.json").is_file() or (destination / "catalog.json").is_file():
-                continue
-            from ionoreview.folders import IMAGE_SUFFIXES, import_image_folder, unique_folder
-            if any(p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES for p in destination.iterdir()):
-                output = filedialog.askdirectory(parent=root, title="Где создать рабочий набор и сохранять разметку?")
-                if not output:
-                    continue
-                destination = import_image_folder(destination, unique_folder(output, "images"))
-                break
-            messagebox.showinfo("ИоноРазметка", "В папке нет набора, каталога или поддерживаемых изображений.", parent=root)
         root.deiconify()
         PortableReviewer(root, destination)
         root.mainloop()
@@ -105,6 +107,8 @@ def self_test(report_path):
     from ionoreview.app import Reviewer
     from ionoreview.clustering import ClusterParams, cluster_ionogram
     from ionoreview.data import ReviewStore, atomic_json, digest
+    from ionoreview.folders import resolve_pack_folder, copy_pack
+    from ionoreview import __version__
 
     with tempfile.TemporaryDirectory(prefix="ionoreview-selftest-") as temp:
         pack = Path(temp) / "pack"
@@ -142,6 +146,12 @@ def self_test(report_path):
         doc["review"].update(status="accepted", reviewer="synthetic self-test")
         store.save(item, doc)
         assert store.export(Path(temp) / "export") == 1
+        annotation_hash = digest(store.path(item))
+        for part in ('images', 'arrays', 'annotations'):
+            assert resolve_pack_folder(pack / part) == pack
+        wrapper = Path(temp) / 'delivery'
+        other_pack = copy_pack(pack, wrapper / 'dataset')
+        assert resolve_pack_folder(wrapper) == other_pack
         root = tk.Tk()
         root.withdraw()
         try:
@@ -150,13 +160,20 @@ def self_test(report_path):
             assert reviewer.item["id"] == "synthetic"
             assert reviewer.original_image.size == (100, 80)
             assert reviewer.db.shape == (80, 100)
+            assert reviewer.switch_pack(other_pack)
+            root.update_idletasks()
+            assert reviewer.store.root == other_pack
+            assert reviewer.document['shapes'][0]['label'] == 'Signal'
+            assert digest(store.path(item)) == annotation_hash
+            assert digest(ReviewStore(other_pack).path(item)) == annotation_hash
         finally:
             root.destroy()
-        report = {"ok": True, "frozen": bool(getattr(sys, "frozen", False)),
+        report = {"ok": True, "frozen": bool(getattr(sys, "frozen", False)), "application_version": __version__,
                   "application_directory": str(application_directory()), "clusters": cluster_counts,
                   "versions": {"numpy": np.__version__, "opencv": cv2.__version__,
                                "scipy": scipy.__version__, "sklearn": sklearn.__version__},
-                  "checks": ["native imports", "PNG/NPZ", "DBSCAN", "K-means", "annotation IO", "Tk startup"]}
+                  "checks": ["native imports", "PNG/NPZ", "DBSCAN", "K-means", "annotation IO", "Tk startup",
+                             "pack subfolders", "delivery wrapper", "pack switching", "annotations preserved"]}
         Path(report_path).parent.mkdir(parents=True, exist_ok=True)
         Path(report_path).write_text(json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8")
     return 0
