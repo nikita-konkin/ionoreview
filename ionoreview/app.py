@@ -12,18 +12,17 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageTk
-from matplotlib import colormaps
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 from . import __version__
 from .data import LABELS, ReviewStore, atomic_json, digest, read_json, safe_child
-from .help import HELP_TEXT
+from .guide import Guide
+from .help import HELP_TEXT, HELP_TEXT_EN
+from .i18n import LANGUAGES, translate
 from .geometry import contains, intersects_rect
+from .palette import ModePalette, TurboPalette
 from .theme import apply_theme,SURFACE,TEXT,MUTED,BORDER
 
-COLORS = {"Signal": "#47e1ae", "1E": "#ffd166", "1F": "#55c7ff",
-          "2F": "#f5a1fa", "3F": "#b9a4ff", "E": "#ffeaa0", "Es": "#ffa965",
-          "Interference": "#ff807c"}
 STATUS = {"pending": "Ожидает", "accepted": "Принято", "changes": "Исправить", "ambiguous": "Неоднозначно"}
 RANGE_PRESETS = {
     "1000–5000": (1000, 5000), "1500–2000": (1500, 2000),
@@ -31,6 +30,7 @@ RANGE_PRESETS = {
     "2700–3100": (2700, 3100), "3000–3500": (3000, 3500),
     "3500–4000": (3500, 4000), "4500–5000": (4500, 5000),
 }
+NEVER = ("Ещё не выполнялся", translate("Ещё не выполнялся", "en"))
 CLUSTER_COLORS = [(255,163,72), (86,223,255), (231,139,255), (255,225,85),
                   (105,240,157), (255,125,155)]
 
@@ -69,11 +69,12 @@ class Reviewer:
         self.photo = None
         self.draw_job = None
         self.help_window = None
+        self.help_body = None
+        self.guide = None
         self.cluster_window = None
         self.cluster_result = None
         self.cluster_generation = 0
         self.cluster_busy = False
-        self.root.title(f"ИоноРазметка v{__version__} — экспертная приёмка")
         width=min(1520,max(1020,self.root.winfo_screenwidth()-100))
         height=min(1000,max(720,self.root.winfo_screenheight()-100))
         self.root.geometry(f"{width}x{height}")
@@ -85,10 +86,12 @@ class Reviewer:
         if settings.exists():
             preferences = read_json(settings)
             self.reviewer.set(preferences.get("reviewer", ""))
+        self.language = tk.StringVar(value=preferences["language"] if preferences.get("language") in LANGUAGES else "ru")
+        self.root.title(self.t("ИоноРазметка v{version} — экспертная приёмка", version=__version__))
         self.source_path = tk.StringVar()
         self.image_path = tk.StringVar()
         self.result_path = tk.StringVar()
-        self.export_path = tk.StringVar(value=preferences.get("last_export", "Ещё не выполнялся"))
+        self.export_path = tk.StringVar(value=self.exported(preferences.get("last_export", "")))
         self.tool = tk.StringVar(value="select")
         self.label = tk.StringVar(value="Signal")
         self.visible = tk.BooleanVar(value=True)
@@ -97,10 +100,19 @@ class Reviewer:
         self.opacity = tk.DoubleVar(value=0.28)
         self.low = tk.DoubleVar(value=25)
         self.high = tk.DoubleVar(value=60)
+        try:
+            font = ImageFont.truetype("segoeuib.ttf", 12)
+        except OSError:
+            font = ImageFont.load_default(12)
+        self.palettes = {"Моды": ModePalette(font), "Turbo": TurboPalette()}
+        self.palette_name = tk.StringVar(value="Моды")
+        self.palette_shown = tk.StringVar(value=self.t("Моды"))
+        self.palette_name.trace_add("write", lambda *args: self.palette_shown.set(self.t(self.palette_name.get())))
+        self.captions = tk.BooleanVar(value=True)
         self.show_proposal = tk.BooleanVar(value=False)
         self.range_low = tk.StringVar(value="1000")
         self.range_high = tk.StringVar(value="5000")
-        self.range_preset = tk.StringVar(value="Весь кадр")
+        self.range_preset = tk.StringVar(value=self.t("Весь кадр"))
         self.path_details=tk.BooleanVar(value=False)
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -127,8 +139,15 @@ class Reviewer:
         self.progress.pack(side="left", padx=(22,10))
         self.overall_progress=ttk.Progressbar(top,length=110,maximum=100)
         self.overall_progress.pack(side='left')
-        ttk.Button(top,text='Правила',command=self.policy).pack(side='right')
-        file_button=ttk.Menubutton(top,text='Файл ▾')
+        ttk.Button(top,text='Справка',command=self.policy).pack(side='right')
+        ttk.Button(top,text='Правила разметки',command=self.show_guide,style='Primary.TButton').pack(side='right',padx=8)
+        language_button=ttk.Menubutton(top,text='Язык')
+        self.language_menu=tk.Menu(language_button,tearoff=False,font=('Segoe UI',10))
+        for code,name in LANGUAGES.items():
+            self.language_menu.add_radiobutton(label=name,variable=self.language,value=code,
+                                               command=lambda:self.set_language(self.language.get()))
+        language_button.configure(menu=self.language_menu);language_button.pack(side='right')
+        file_button=ttk.Menubutton(top,text='Файл')
         menu=tk.Menu(file_button,tearoff=False,font=('Segoe UI',10))
         menu.add_command(label='Открыть папку…',accelerator='Ctrl+O',command=self.open_folder)
         menu.add_command(label='Каталог…',command=self.open_library)
@@ -138,8 +157,6 @@ class Reviewer:
                          state='disabled' if self.store.manifest.get('assistance_disabled') else 'normal')
         menu.add_command(label='Экспорт принятых…',command=self.export)
         file_button.configure(menu=menu);file_button.pack(side='right',padx=8)
-        ttk.Button(top,text='Каталог…',command=self.open_library).pack(side='right',padx=3)
-        ttk.Button(top,text='Открыть папку…',command=self.open_folder).pack(side='right',padx=3)
         ttk.Separator(self.root).pack(fill='x')
         body = ttk.Panedwindow(self.root, orient="horizontal")
         body.pack(fill="both", expand=True)
@@ -196,9 +213,10 @@ class Reviewer:
         ttk.Button(row, text="Сменить класс", command=self.relabel).pack(side="right")
         row = ttk.Frame(self.left)
         row.pack(fill="x", pady=3)
-        ttk.Button(row, text="Удалить", command=self.delete_shape,style='Danger.TButton').pack(side="left")
-        ttk.Button(row, text="Группа…", command=self.group).pack(side="left", padx=4)
-        ttk.Button(row, text="Отмена", command=self.undo).pack(side="right")
+        row.columnconfigure((0, 1, 2), weight=1, uniform="actions")
+        ttk.Button(row, text="Удалить", command=self.delete_shape,style='Danger.TButton').grid(row=0, column=0, sticky="ew")
+        ttk.Button(row, text="Группа…", command=self.group).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Button(row, text="Отмена", command=self.undo).grid(row=0, column=2, sticky="ew")
         ttk.Checkbutton(self.left, text="При переносе двигать всю группу", variable=self.move_group).pack(anchor="w", pady=4)
         ttk.Checkbutton(self.left, text="Полезный сигнал отсутствует", variable=self.no_signal,
                         command=self.changed).pack(anchor="w", pady=8)
@@ -236,10 +254,9 @@ class Reviewer:
         ttk.Button(navigation, text="Вокруг масок", command=self.focus_masks).pack(side="left", padx=4)
         ttk.Button(navigation, text="+", width=3, command=lambda: self.zoom_center(.8)).pack(side="left")
         ttk.Button(navigation, text="−", width=3, command=lambda: self.zoom_center(1.25)).pack(side="left", padx=4)
-        ttk.Label(navigation, text="Shift + колесо: только дальность").pack(side="left", padx=8)
         ranges = ttk.Frame(right, padding=(8, 0, 8, 6))
         ranges.pack(fill="x")
-        self.range_caption = ttk.Label(ranges, text="Дальность, км:")
+        self.range_caption = ttk.Label(ranges, text="")
         self.range_caption.pack(side="left")
         low_entry = ttk.Entry(ranges, textvariable=self.range_low, width=8)
         low_entry.pack(side="left", padx=(5, 2))
@@ -262,7 +279,7 @@ class Reviewer:
         self.add_clusters_button = ttk.Button(auto, text="Добавить кластеры", command=self.add_clusters, state="disabled")
         self.add_clusters_button.pack(side="left", padx=4)
         ttk.Button(auto, text="Скрыть кандидаты", command=lambda: self.clear_clusters(invalidate=True)).pack(side="left")
-        self.cluster_summary = ttk.Label(auto, text="Кандидатов нет")
+        self.cluster_summary = ttk.Label(auto, text="")
         self.cluster_summary.pack(side="left", padx=8)
         self.canvas = tk.Canvas(right, width=1, height=1, bg="#17212c", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
@@ -289,13 +306,19 @@ class Reviewer:
         contrasts = ttk.Frame(right, padding=(8, 4))
         contrasts.pack(fill="x")
         ttk.Label(contrasts, text="Шкала дБ:").pack(side="left")
-        ttk.Scale(contrasts, from_=0, to=45, variable=self.low, length=110, command=lambda v: self.schedule_draw()).pack(side="left")
-        ttk.Scale(contrasts, from_=35, to=85, variable=self.high, length=110, command=lambda v: self.schedule_draw()).pack(side="left")
+        ttk.Scale(contrasts, from_=0, to=45, variable=self.low, length=90, command=lambda v: self.schedule_draw()).pack(side="left")
+        ttk.Scale(contrasts, from_=35, to=85, variable=self.high, length=90, command=lambda v: self.schedule_draw()).pack(side="left")
         ttk.Label(contrasts, text="Прозрачность:").pack(side="left", padx=(12, 0))
-        ttk.Scale(contrasts, from_=0, to=.65, variable=self.opacity, length=90, command=lambda v: self.schedule_draw()).pack(side="left")
+        ttk.Scale(contrasts, from_=0, to=.65, variable=self.opacity, length=70, command=lambda v: self.schedule_draw()).pack(side="left")
+        ttk.Label(contrasts, text="Цвета:").pack(side="left", padx=(12, 0))
+        self.palette_box = ttk.Combobox(contrasts, textvariable=self.palette_shown, state="readonly", width=8,
+                                        values=[self.t(name) for name in self.palettes])
+        self.palette_box.pack(side="left", padx=(4, 0))
+        self.palette_box.bind("<<ComboboxSelected>>", self.choose_palette)
+        ttk.Checkbutton(contrasts, text="Подписи", variable=self.captions, command=self.redraw).pack(side="left", padx=(8, 0))
         self.cursor_text = ttk.Label(contrasts, text="", width=30, anchor="e")
         self.cursor_text.pack(side="right")
-        self.help_text = ttk.Label(right, text="Колесо — масштаб  ·  Средняя кнопка — сдвиг  ·  Ctrl+Z — отмена  ·  Backspace — убрать точку  ·  Esc — отменить полигон",style='Muted.TLabel',font=('Segoe UI',9),padding=(8,4))
+        self.help_text = ttk.Label(right, text="Колесо — масштаб  ·  Shift + колесо — дальность  ·  Средняя кнопка — сдвиг  ·  Esc — отмена полигона",style='Muted.TLabel',font=('Segoe UI',9),padding=(8,4))
         self.help_text.pack(fill="x")
         bottom = ttk.Frame(self.root, padding=8)
         bottom.pack(side="bottom", fill="x", before=body)
@@ -320,7 +343,64 @@ class Reviewer:
             for column,widget in enumerate(widgets):
                 widget.grid(row=row,column=column,sticky='ew' if column==1 else 'w',padx=3,pady=2)
                 if row>=2:widget.grid_remove();self.extra_path_widgets.append(widget)
+        self.dynamic = {self.progress, self.case_info, self.current_status, self.feedback, self.cluster_summary,
+                        self.range_caption, self.label_menu_title, self.cursor_text}
+        self.sources = {}
+        self.collect_sources(self.root)
         self.refresh_cases()
+
+    def t(self, text, **fields):
+        return translate(text, self.language.get(), **fields)
+
+    def exported(self, value):
+        return value if value and value not in NEVER else self.t("Ещё не выполнялся")
+
+    def collect_sources(self, widget):
+        """Remember each static caption in its Russian source form so it can be translated again at any time."""
+        if isinstance(widget, tk.Menu):
+            last = widget.index("end")
+            for position in range(0 if last is not None else 1, (last or -1) + 1):
+                if widget.type(position) not in ("separator", "tearoff"):
+                    self.sources[(widget, position)] = widget.entrycget(position, "label")
+        elif widget not in self.dynamic and "text" in widget.keys() and str(widget.cget("text")):
+            self.sources[widget] = str(widget.cget("text"))
+        for child in widget.winfo_children():
+            if not isinstance(child, tk.Toplevel):
+                self.collect_sources(child)
+
+    def set_language(self, code):
+        if code not in LANGUAGES:
+            raise ValueError(f"Unknown interface language: {code}")
+        self.language.set(code)
+        self.root.title(self.t("ИоноРазметка v{version} — экспертная приёмка", version=__version__))
+        for key, source in self.sources.items():
+            if isinstance(key, tuple):
+                key[0].entryconfigure(key[1], label=self.t(source))
+            else:
+                key.configure(text=self.t(source))
+        self.palette_box.configure(values=[self.t(name) for name in self.palettes])
+        self.palette_shown.set(self.t(self.palette_name.get()))
+        self.export_path.set(self.exported(self.export_path.get()))
+        self.refresh_cases()
+        self.refresh_objects()
+        self.describe_case()
+        self.refresh_status()
+        self.refresh_cluster_summary()
+        self.refresh_range_caption()
+        self.sync_range_fields()
+        self.feedback.config(text=self.t("Исходник: {name}", name=Path(self.item["source"]).name))
+        if self.help_window is not None and self.help_window.winfo_exists():
+            self.fill_help()
+        if self.guide is not None and self.guide.exists():
+            self.guide.render(code)
+        try:
+            self.save_settings()
+        except OSError:
+            pass
+
+    def choose_palette(self, event=None):
+        self.palette_name.set(next(name for name in self.palettes if self.t(name) == self.palette_shown.get()))
+        self.redraw()
 
     def toggle_paths(self):
         self.path_details.set(not self.path_details.get())
@@ -334,20 +414,34 @@ class Reviewer:
             return
         window = tk.Toplevel(self.root)
         self.help_window = window
-        window.title("Правила и справка — ИоноРазметка")
         self.place_window(window, 900, 740)
         window.minsize(650, 450)
         window.transient(self.root)
-        ttk.Button(window, text="Закрыть справку", command=window.destroy).pack(side="bottom", pady=8)
+        self.help_close = ttk.Button(window, command=window.destroy)
+        self.help_close.pack(side="bottom", pady=8)
         scroll = ttk.Scrollbar(window, orient="vertical")
         scroll.pack(side="right", fill="y")
-        text = tk.Text(window, wrap="word", font=("Segoe UI", 11), padx=16, pady=12,
-                       yscrollcommand=scroll.set)
-        text.pack(fill="both", expand=True)
-        scroll.config(command=text.yview)
-        text.insert("1.0", HELP_TEXT + "\n\nПРАВИЛА РАЗМЕТКИ ТЕКУЩЕГО НАБОРА\n\n" +
-                    self.store.manifest.get("annotation_policy", ""))
-        text.configure(state="disabled")
+        self.help_body = tk.Text(window, wrap="word", font=("Segoe UI", 11), padx=16, pady=12,
+                                 yscrollcommand=scroll.set)
+        self.help_body.pack(fill="both", expand=True)
+        scroll.config(command=self.help_body.yview)
+        self.fill_help()
+
+    def fill_help(self):
+        self.help_window.title(self.t("Правила и справка — ИоноРазметка"))
+        self.help_close.configure(text=self.t("Закрыть справку"))
+        self.help_body.configure(state="normal")
+        self.help_body.delete("1.0", "end")
+        self.help_body.insert("1.0", (HELP_TEXT_EN if self.language.get() == "en" else HELP_TEXT) + "\n\n" +
+                              self.t("ПРАВИЛА РАЗМЕТКИ ТЕКУЩЕГО НАБОРА") + "\n\n" +
+                              self.store.manifest.get("annotation_policy", ""))
+        self.help_body.configure(state="disabled")
+
+    def show_guide(self):
+        if self.guide is not None and self.guide.exists():
+            self.guide.lift()
+            return
+        self.guide = Guide(self.root, self.language.get(), self.place_window)
 
     def place_window(self, window, width, height):
         x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - width) // 2)
@@ -356,7 +450,7 @@ class Reviewer:
 
     def open_cluster_dialog(self):
         if self.store.manifest.get('assistance_disabled'):
-            self.feedback.configure(text='Независимая разметка: автоматические подсказки отключены')
+            self.feedback.configure(text=self.t('Независимая разметка: автоматические подсказки отключены'))
             return
         if self.cluster_window is not None and self.cluster_window.winfo_exists():
             self.cluster_window.lift()
@@ -367,40 +461,41 @@ class Reviewer:
                     min_span_mhz=5, coordinate_units="pixels") if pixels else ClusterParams())
         window = tk.Toplevel(self.root)
         self.cluster_window = window
-        window.title("Авторазметка — кластеризация")
+        window.title(self.t("Авторазметка — кластеризация"))
         window.transient(self.root)
         self.place_window(window, 620, 550)
         frame = ttk.Frame(window, padding=15)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Поиск кластеров сигнала", style="Title.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        method = tk.StringVar(value="Авто (DBSCAN)")
-        methods = ttk.Combobox(frame, textvariable=method, values=["Авто (DBSCAN)", "Вручную (K-means)"], state="readonly", width=25)
+        ttk.Label(frame, text=self.t("Поиск кластеров сигнала"), style="Title.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        automatic, manual_name = self.t("Авто (DBSCAN)"), self.t("Вручную (K-means)")
+        method = tk.StringVar(value=automatic)
+        methods = ttk.Combobox(frame, textvariable=method, values=[automatic, manual_name], state="readonly", width=25)
         methods.grid(row=1, column=0, sticky="w", pady=5)
         manual = ttk.Frame(frame)
         manual.grid(row=1, column=1, sticky="w", padx=15)
-        ttk.Label(manual, text="Число:").pack(side="left")
+        ttk.Label(manual, text=self.t("Число:")).pack(side="left")
         k = tk.StringVar(value="2")
         k_entry = ttk.Entry(manual, textvariable=k, width=5, state="disabled")
         k_entry.pack(side="left", padx=4)
-        methods.bind("<<ComboboxSelected>>", lambda e: k_entry.configure(state="normal" if method.get().startswith("Вручную") else "disabled"))
+        methods.bind("<<ComboboxSelected>>", lambda e: k_entry.configure(state="normal" if method.get() == manual_name else "disabled"))
         fields = {}
-        labels = (("Порог яркости, 0–255" if pixels else "Порог, дБ", "threshold_db"),
-                  ("Связь по x, пиксели" if pixels else "Связь по частоте, МГц", "frequency_gap_mhz"),
-                  ("Связь по y, пиксели" if pixels else "Связь по дальности, км", "range_gap_km"),
-                  ("Соседей DBSCAN для плотной точки", "min_samples"),
-                  ("Минимум точек в кластере", "min_cluster_points"),
-                  ("Минимальная ширина, пиксели" if pixels else "Минимальная полоса, МГц", "min_span_mhz"))
+        labels = ((self.t("Порог яркости, 0–255" if pixels else "Порог, дБ"), "threshold_db"),
+                  (self.t("Связь по x, пиксели" if pixels else "Связь по частоте, МГц"), "frequency_gap_mhz"),
+                  (self.t("Связь по y, пиксели" if pixels else "Связь по дальности, км"), "range_gap_km"),
+                  (self.t("Соседей DBSCAN для плотной точки"), "min_samples"),
+                  (self.t("Минимум точек в кластере"), "min_cluster_points"),
+                  (self.t("Минимальная ширина, пиксели" if pixels else "Минимальная полоса, МГц"), "min_span_mhz"))
         for row, (label, key) in enumerate(labels, 2):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=4)
             variable = tk.StringVar(value=str(getattr(defaults, key)))
             fields[key] = variable
             ttk.Entry(frame, textvariable=variable, width=12).grid(row=row, column=1, sticky="w", padx=15)
         visible_only = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame, text="Только видимая область", variable=visible_only).grid(row=8, column=0, columnspan=2, sticky="w", pady=7)
-        ttk.Label(frame, text="Кандидаты будут показаны оранжевым. Существующие маски сохраняются.\n"
+        ttk.Checkbutton(frame, text=self.t("Только видимая область"), variable=visible_only).grid(row=8, column=0, columnspan=2, sticky="w", pady=7)
+        ttk.Label(frame, text=self.t("Кандидаты будут показаны оранжевым. Существующие маски сохраняются.\n"
                   "Метки 1F / 2F / E назначает пользователь после добавления.\n"
-                  "Расчёт не зависит от ползунков цветовой шкалы." +
-                  ("\nPNG без осей: сначала выделите область графика без подписей." if pixels else ""),
+                  "Расчёт не зависит от ползунков цветовой шкалы.") +
+                  (self.t("\nPNG без осей: сначала выделите область графика без подписей.") if pixels else ""),
                   wraplength=570).grid(row=9, column=0, columnspan=2, sticky="w", pady=10)
         error = ttk.Label(frame, text="", wraplength=530)
         error.grid(row=10, column=0, columnspan=2, sticky="w")
@@ -408,26 +503,26 @@ class Reviewer:
             try:
                 values = {key: (int(var.get()) if key in {"min_samples", "min_cluster_points"}
                                else float(var.get().replace(",", "."))) for key, var in fields.items()}
-                values.update(method="K-means" if method.get().startswith("Вручную") else "DBSCAN",
-                              n_clusters=int(k.get()) if method.get().startswith("Вручную") else 2,
+                values.update(method="K-means" if method.get() == manual_name else "DBSCAN",
+                              n_clusters=int(k.get()) if method.get() == manual_name else 2,
                               coordinate_units="pixels" if pixels else "physical")
                 params = ClusterParams(**values)
                 params.validate()
                 self.start_clustering(params, visible_only.get())
-                error.config(text="Расчёт запущен. Кандидаты появятся на графике.")
+                error.config(text=self.t("Расчёт запущен. Кандидаты появятся на графике."))
             except (ValueError, ImportError) as exc:
                 error.config(text=str(exc))
-        ttk.Button(frame, text="Найти кластеры", command=start).grid(row=11, column=0, sticky="w", pady=10)
-        ttk.Button(frame, text="Закрыть параметры", command=window.destroy).grid(row=11, column=1, sticky="w", padx=15)
+        ttk.Button(frame, text=self.t("Найти кластеры"), command=start).grid(row=11, column=0, sticky="w", pady=10)
+        ttk.Button(frame, text=self.t("Закрыть параметры"), command=window.destroy).grid(row=11, column=1, sticky="w", padx=15)
 
     def start_clustering(self, params, visible_only=True):
         if self.cluster_busy:
-            raise ValueError("Дождитесь текущего расчёта")
+            raise ValueError(self.t("Дождитесь текущего расчёта"))
         if self.vertices:
-            raise ValueError("Сначала замкните полигон или отмените незавершённые точки")
+            raise ValueError(self.t("Сначала замкните полигон или отмените незавершённые точки"))
         params.validate()
         if (self.db is None) != (params.coordinate_units == "pixels"):
-            raise ValueError("Единицы параметров не соответствуют текущему изображению")
+            raise ValueError(self.t("Единицы параметров не соответствуют текущему изображению"))
         from .clustering import cluster_ionogram, image_features
         view = tuple(self.view) if visible_only else (0, 0, self.item["width"] - 1, self.item["height"] - 1)
         self.cluster_generation += 1
@@ -441,7 +536,7 @@ class Reviewer:
         self.clear_clusters()
         self.cluster_busy = True
         self.cluster_button.configure(state="disabled")
-        self.cluster_summary.configure(text=f"{params.method}: расчёт…")
+        self.cluster_summary.configure(text=self.t("{method}: расчёт…", method=params.method))
         def worker():
             try:
                 result_queue.put((True, cluster_ionogram(db, freq, ranges, view, params)))
@@ -457,12 +552,12 @@ class Reviewer:
             self.cluster_busy = False
             self.cluster_button.configure(state="normal")
             if self.item["id"] != ident or self.cluster_generation != generation:
-                self.cluster_summary.configure(text="Кандидаты отменены или кадр сменился")
+                self.cluster_summary.configure(text=self.t("Кандидаты отменены или кадр сменился"))
                 return
             if ok:
                 self.show_clusters(result)
             else:
-                self.cluster_summary.configure(text="Расчёт не выполнен")
+                self.cluster_summary.configure(text=self.t("Расчёт не выполнен"))
                 self.feedback.configure(text=result)
         self.root.after(80, receive)
 
@@ -473,9 +568,10 @@ class Reviewer:
             shape.setdefault("flags", {})["proposal_run"] = run
         self.cluster_result = result
         count = result.stats["clusters"]
-        self.cluster_summary.configure(text=f"Кластеров: {count}; полигонов: {len(result.shapes)}")
+        self.cluster_summary.configure(text=self.t("Кластеров: {clusters}; полигонов: {polygons}", clusters=count, polygons=len(result.shapes)))
         self.add_clusters_button.configure(state="normal" if result.shapes else "disabled")
-        self.feedback.configure(text=f"{result.params['method']}: {result.stats['points']} точек, шум {result.stats['noise_points']}. Кандидаты ещё не разметка.")
+        self.feedback.configure(text=self.t("{method}: {points} точек, шум {noise}. Кандидаты ещё не разметка.",
+                                            method=result.params['method'], points=result.stats['points'], noise=result.stats['noise_points']))
         self.redraw()
 
     def clear_clusters(self, invalidate=False):
@@ -485,12 +581,21 @@ class Reviewer:
         self.selected_candidates.clear()
         self.hide_label_menu()
         self.add_clusters_button.configure(state="disabled")
-        self.cluster_summary.configure(text="Кандидатов нет")
+        self.refresh_cluster_summary()
         self.redraw()
+
+    def refresh_cluster_summary(self):
+        if self.cluster_result is not None:
+            self.cluster_summary.configure(text=self.t("Кластеров: {clusters}; полигонов: {polygons}",
+                clusters=len({s.get('group_id') for s in self.cluster_result.shapes}), polygons=len(self.cluster_result.shapes)))
+        elif self.store.manifest.get('assistance_disabled'):
+            self.cluster_summary.configure(text=self.t('Независимый тест: без автоматических подсказок'))
+        else:
+            self.cluster_summary.configure(text=self.t("Кандидатов нет"))
 
     def add_clusters(self):
         if self.store.manifest.get('assistance_disabled'):
-            self.feedback.configure(text="В независимом тесте автоматические подсказки отключены")
+            self.feedback.configure(text=self.t("В независимом тесте автоматические подсказки отключены"))
             return
         if self.cluster_result is None or not self.cluster_result.shapes:
             return
@@ -498,7 +603,7 @@ class Reviewer:
         candidates = [copy.deepcopy(s) for s in self.cluster_result.shapes
                       if tuple(tuple(p) for p in s["points"]) not in existing]
         if not candidates:
-            self.feedback.configure(text="Эти полигоны уже есть в разметке")
+            self.feedback.configure(text=self.t("Эти полигоны уже есть в разметке"))
             self.clear_clusters()
             return
         self.snapshot()
@@ -516,17 +621,17 @@ class Reviewer:
         self.changed()
         self.clear_clusters()
         self.refresh_objects()
-        self.feedback.configure(text=f"Добавлено полигонов: {len(candidates)}. Исправьте и назначьте классы; затем примите.")
+        self.feedback.configure(text=self.t("Добавлено полигонов: {count}. Исправьте и назначьте классы; затем примите.", count=len(candidates)))
 
     def copy_path(self, variable):
         self.root.clipboard_clear()
         self.root.clipboard_append(variable.get())
-        self.feedback.config(text="Путь скопирован")
+        self.feedback.config(text=self.t("Путь скопирован"))
 
     def open_path_folder(self, variable):
         path = Path(variable.get())
         if not path.is_absolute():
-            self.feedback.config(text="Папка ещё не задана")
+            self.feedback.config(text=self.t("Папка ещё не задана"))
             return
         folder = path if path.is_dir() else path.parent
         while not folder.exists() and folder != folder.parent:
@@ -534,7 +639,7 @@ class Reviewer:
         try:
             os.startfile(str(folder))
         except OSError as exc:
-            self.feedback.config(text=f"Не удалось открыть папку: {exc}")
+            self.feedback.config(text=self.t("Не удалось открыть папку: {error}", error=exc))
 
     def switch_pack(self, destination):
         if (self.dirty or self.vertices) and not self.save():
@@ -547,19 +652,21 @@ class Reviewer:
         self.clear_clusters()
         if self.cluster_window is not None and self.cluster_window.winfo_exists():
             self.cluster_window.destroy()
-        self.export_path.set("Ещё не выполнялся")
         settings = store.root / "settings.json"
-        if settings.exists():
-            self.export_path.set(read_json(settings).get("last_export", "Ещё не выполнялся"))
+        self.export_path.set(self.exported(read_json(settings).get("last_export", "") if settings.exists() else ""))
         self.load(0)
         self.refresh_cases()
+        try:
+            self.save_settings()
+        except OSError:
+            pass
         return True
 
     def open_folder(self):
         if (self.dirty or self.vertices) and not self.save():
             return
         folder = filedialog.askdirectory(parent=self.root, initialdir=str(self.store.root),
-                                        title="Открыть набор, папку images/annotations или папку изображений")
+                                        title=self.t("Открыть набор, папку images/annotations или папку изображений"))
         if not folder:
             return
         try:
@@ -573,7 +680,7 @@ class Reviewer:
                 self.switch_pack(pack_folder)
                 return
             require_image_files(folder)
-            parent = filedialog.askdirectory(parent=self.root, title="Где создать рабочую папку с PNG и разметкой?")
+            parent = filedialog.askdirectory(parent=self.root, title=self.t("Где создать рабочую папку с PNG и разметкой?"))
             if not parent:
                 return
             self.root.configure(cursor="watch")
@@ -581,7 +688,7 @@ class Reviewer:
             destination = import_image_folder(folder, unique_folder(parent, "images"))
             self.switch_pack(destination)
         except Exception as exc:
-            messagebox.showerror("Не удалось открыть папку", str(exc))
+            messagebox.showerror(self.t("Не удалось открыть папку"), str(exc))
         finally:
             self.root.configure(cursor="")
 
@@ -594,12 +701,12 @@ class Reviewer:
             target=choose(self.root,folder)
             if target:self.switch_pack(target)
         except Exception as exc:
-            messagebox.showerror('Не удалось открыть каталог',str(exc))
+            messagebox.showerror(self.t('Не удалось открыть каталог'),str(exc))
 
     def save_pack_as(self):
         if (self.dirty or self.vertices) and not self.save():
             return
-        parent = filedialog.askdirectory(title="Где сохранить копию всего рабочего набора?")
+        parent = filedialog.askdirectory(title=self.t("Где сохранить копию всего рабочего набора?"))
         if not parent:
             return
         from .folders import copy_pack, unique_folder
@@ -607,13 +714,14 @@ class Reviewer:
             destination = copy_pack(self.store.root, unique_folder(parent, "copy"))
             self.switch_pack(destination)
         except Exception as exc:
-            messagebox.showerror("Не удалось сохранить набор", str(exc))
+            messagebox.showerror(self.t("Не удалось сохранить набор"), str(exc))
 
     def save_settings(self):
         path = self.store.root / "settings.json"
         preferences = read_json(path) if path.exists() else {}
         preferences["reviewer"] = self.reviewer.get().strip()
         preferences["last_export"] = self.export_path.get()
+        preferences["language"] = self.language.get()
         if self.item is not None:
             preferences["last_case"] = self.item["id"]
         atomic_json(path, preferences)
@@ -625,10 +733,10 @@ class Reviewer:
         for item in self.store.items:
             status = self.store.load(item)["review"]["status"]
             accepted += status == "accepted"
-            self.cases.insert("end", f"{item['id']}  ·  {STATUS[status]}")
+            self.cases.insert("end", f"{item['id']}  ·  {self.t(STATUS[status])}")
         self.cases.selection_set(self.index)
         self.cases.see(self.index)
-        self.progress.config(text=f"Принято {accepted} из {len(self.store.items)}")
+        self.progress.config(text=self.t("Принято {done} из {total}", done=accepted, total=len(self.store.items)))
         self.overall_progress.configure(value=100*accepted/max(1,len(self.store.items)))
         self.loading = False
 
@@ -641,8 +749,8 @@ class Reviewer:
             return
         self.dirty = True
         self.document["review"]["status"] = "pending"
-        self.current_status.config(text="Ожидает · есть изменения")
-        self.feedback.config(text="Правки сохранятся при переходе или Ctrl+S")
+        self.current_status.config(text=self.t("Ожидает · есть изменения"))
+        self.feedback.config(text=self.t("Правки сохранятся при переходе или Ctrl+S"))
         self.current_status.configure(style='Pending.TLabel')
 
     def note_modified(self, event=None):
@@ -666,19 +774,19 @@ class Reviewer:
 
     def save(self):
         if self.vertices:
-            messagebox.showinfo("Незавершённый полигон", "Замкните полигон или нажмите Esc")
+            messagebox.showinfo(self.t("Незавершённый полигон"), self.t("Замкните полигон или нажмите Esc"))
             return False
         try:
             self.collect()
             self.document = self.store.save(self.item, self.document)
             self.save_settings()
             self.dirty = False
-            self.current_status.config(text=STATUS[self.document["review"]["status"]])
+            self.current_status.config(text=self.t(STATUS[self.document["review"]["status"]]))
             self.refresh_cases()
-            self.feedback.config(text="Сохранено на диск")
+            self.feedback.config(text=self.t("Сохранено на диск"))
             return True
         except Exception as exc:
-            messagebox.showerror("Не удалось сохранить", str(exc))
+            messagebox.showerror(self.t("Не удалось сохранить"), str(exc))
             return False
 
     def load(self, index):
@@ -688,7 +796,7 @@ class Reviewer:
         try:
             image_path = safe_child(self.store.root, item["image"])
             if digest(image_path) != item["image_sha256"]:
-                raise ValueError("Контрольная сумма изображения не совпадает")
+                raise ValueError(self.t("Контрольная сумма изображения не совпадает"))
             image = Image.open(image_path).convert("RGB")
             doc = self.store.load(item)
             db = freq = ranges = None
@@ -699,9 +807,9 @@ class Reviewer:
                     freq = data["freq_mhz"].copy()
                     ranges = data["range_km"].copy()
                 if db.shape != (item["height"], item["width"]) or len(freq) != item["width"] or len(ranges) != item["height"]:
-                    raise ValueError("Оси не совпадают с матрицей")
+                    raise ValueError(self.t("Оси не совпадают с матрицей"))
         except Exception as exc:
-            messagebox.showerror("Не удалось открыть", str(exc))
+            messagebox.showerror(self.t("Не удалось открыть"), str(exc))
             return False
         self.loading = True
         self.index, self.item, self.document = index, item, doc
@@ -712,7 +820,7 @@ class Reviewer:
         for control in self.range_controls[:-1]:
             control.configure(state="normal" if ranges is not None else "disabled")
         self.range_controls[-1].configure(state="readonly" if ranges is not None else "disabled")
-        self.range_caption.configure(text="Дальность, км:" if ranges is not None else "Окно: пиксели")
+        self.refresh_range_caption()
         if ranges is None:
             self.range_low.set("—")
             self.range_high.set("—")
@@ -727,22 +835,11 @@ class Reviewer:
         self.note.delete("1.0", "end")
         self.note.insert("1.0", doc["review"].get("note", ""))
         self.note.edit_modified(False)
-        proposal = doc.get("proposal", {}).get("author", "нет")
-        self.case_info.config(text=f"{item['id']} · {item.get('split', 'unassigned')}\n"
-            f"{item.get('tx', '')} → {item.get('rx', '')}\n{item.get('when', '')}\n"
-            f"{item['width']} × {item['height']} пикселей\nПредразметка: {proposal}" +
-            ("\nДальность относительная!" if item.get("range_is_relative") else "") +
-            ("\nОсь дальности из настроек приёма" if item.get("range_is_configured") else ""))
-        if item.get("source_kind") == "image":
-            self.case_info.configure(text=f"{item['id']} · {item.get('split','unassigned')}\n{item.get('original_name', '')}\n"
-                f"{item['width']} × {item['height']} пикселей\nЧисловых осей нет")
-        self.current_status.config(text=STATUS[doc["review"]["status"]])
-        styles={'pending':'Pending.TLabel','accepted':'Accepted.TLabel','changes':'Changes.TLabel','ambiguous':'Ambiguous.TLabel'}
-        self.current_status.configure(style=styles[doc['review']['status']])
+        self.describe_case()
+        self.refresh_status()
         self.cluster_button.configure(state='disabled' if self.store.manifest.get('assistance_disabled') else 'normal')
-        if self.store.manifest.get('assistance_disabled'):
-            self.cluster_summary.configure(text='Независимый тест: без автоматических подсказок')
-        self.feedback.config(text="Исходник: " + Path(item["source"]).name)
+        self.refresh_cluster_summary()
+        self.feedback.config(text=self.t("Исходник: {name}", name=Path(item["source"]).name))
         self.cases.selection_clear(0, "end")
         self.cases.selection_set(index)
         self.cases.see(index)
@@ -750,6 +847,29 @@ class Reviewer:
         self.refresh_objects()
         self.fit()
         return True
+
+    def describe_case(self):
+        item, doc = self.item, self.document
+        proposal = doc.get("proposal", {}).get("author", self.t("нет"))
+        if item.get("source_kind") == "image":
+            self.case_info.config(text=self.t("{id} · {split}\n{name}\n{width} × {height} пикселей\nЧисловых осей нет",
+                id=item['id'], split=item.get('split', 'unassigned'), name=item.get('original_name', ''),
+                width=item['width'], height=item['height']))
+            return
+        self.case_info.config(text=self.t("{id} · {split}\n{tx} → {rx}\n{when}\n{width} × {height} пикселей\nПредразметка: {proposal}",
+            id=item['id'], split=item.get('split', 'unassigned'), tx=item.get('tx', ''), rx=item.get('rx', ''),
+            when=item.get('when', ''), width=item['width'], height=item['height'], proposal=proposal) +
+            (self.t("\nДальность относительная!") if item.get("range_is_relative") else "") +
+            (self.t("\nОсь дальности из настроек приёма") if item.get("range_is_configured") else ""))
+
+    def refresh_status(self):
+        status = self.document["review"]["status"]
+        styles = {'pending': 'Pending.TLabel', 'accepted': 'Accepted.TLabel', 'changes': 'Changes.TLabel', 'ambiguous': 'Ambiguous.TLabel'}
+        self.current_status.config(text=self.t(STATUS[status]) + (self.t(" · есть изменения") if self.dirty else ""))
+        self.current_status.configure(style=styles[status])
+
+    def refresh_range_caption(self):
+        self.range_caption.configure(text=self.t("Дальность, км:" if self.ranges is not None else "Окно: пиксели"))
 
     def choose_case(self, event=None):
         if not self.loading and self.cases.curselection():
@@ -775,8 +895,8 @@ class Reviewer:
         self.objects.delete(0, "end")
         for i, shape in enumerate(self.document["shapes"]):
             group = shape.get("group_id")
-            self.objects.insert("end", f"{i + 1}. {shape['label']} · {len(shape['points'])} вершин" +
-                                (f" · гр. {group}" if group is not None else ""))
+            self.objects.insert("end", self.t("{n}. {label} · {points} вершин", n=i + 1, label=shape['label'], points=len(shape['points'])) +
+                                (self.t(" · гр. {group}", group=group) if group is not None else ""))
             self.objects.itemconfig(i, fg={"Signal": "#147353", "1E": "#856100",
                 "1F": "#12628c", "2F": "#884385", "3F": "#65539a", "E": "#806519",
                 "Es": "#a4551d", "Interference": "#ac3531"}[shape["label"]])
@@ -809,7 +929,7 @@ class Reviewer:
         if not count:
             self.hide_label_menu()
             return
-        self.label_menu_title.configure(text=f"Выбрано полигонов: {count}. Назначить метку:")
+        self.label_menu_title.configure(text=self.t("Выбрано полигонов: {count}. Назначить метку:", count=count))
         self.label_menu.update_idletasks()
         width, height = self.label_menu.winfo_reqwidth(), self.label_menu.winfo_reqheight()
         x = self.canvas.winfo_width()-width-12 if x is None else x+12
@@ -894,18 +1014,18 @@ class Reviewer:
         self.changed()
         self.hide_label_menu()
         self.refresh_objects()
-        self.feedback.configure(text=f"Метка {label} назначена полигонам: {len(selected)}")
+        self.feedback.configure(text=self.t("Метка {label} назначена полигонам: {count}", label=label, count=len(selected)))
 
     def update_cluster_summary(self):
         if not self.cluster_result or not self.cluster_result.shapes:
             self.cluster_result = None
-            self.cluster_summary.configure(text="Кандидатов нет")
+            self.refresh_cluster_summary()
             self.add_clusters_button.configure(state='disabled')
             return
         shapes = self.cluster_result.shapes
         count = len({s.get('group_id') for s in shapes})
         self.cluster_result.stats.update(clusters=count, polygons=len(shapes))
-        self.cluster_summary.configure(text=f"Кластеров: {count}; полигонов: {len(shapes)}")
+        self.refresh_cluster_summary()
 
     def right_click(self, event):
         if self.vertices:
@@ -924,7 +1044,7 @@ class Reviewer:
     def group(self):
         if self.selected is None:
             return
-        value = simpledialog.askinteger("Части одной моды", "Общий номер группы (0 — убрать):", minvalue=0, parent=self.root)
+        value = simpledialog.askinteger(self.t("Части одной моды"), self.t("Общий номер группы (0 — убрать):"), minvalue=0, parent=self.root)
         if value is not None:
             self.snapshot()
             for index in self.selection:
@@ -974,7 +1094,7 @@ class Reviewer:
         """Undo only an unfinished polygon's last vertex, never a saved mask."""
         if self.vertices:
             self.vertices.pop()
-            self.feedback.config(text=f"Последняя точка убрана. Осталось вершин: {len(self.vertices)}")
+            self.feedback.config(text=self.t("Последняя точка убрана. Осталось вершин: {count}", count=len(self.vertices)))
             self.redraw()
         self.canvas.focus_set()
         return "break"
@@ -988,7 +1108,7 @@ class Reviewer:
         if not self.vertices:
             return
         if len(self.vertices) < 3:
-            self.feedback.config(text="Для полигона нужны минимум три вершины")
+            self.feedback.config(text=self.t("Для полигона нужны минимум три вершины"))
             return
         from .data import validate_shapes
         shape = {"label": self.label.get(), "points": self.vertices[:], "group_id": None,
@@ -1185,7 +1305,7 @@ class Reviewer:
         if self.freq is not None:
             f = np.interp(x, np.arange(len(self.freq)), self.freq)
             r = np.interp(y, np.arange(len(self.ranges)), self.ranges)
-            text = f"{f:.3f} МГц · {r:.1f} км"
+            text = self.t("{freq:.3f} МГц · {range:.1f} км", freq=f, range=r)
         self.cursor_text.config(text=text)
 
     def clamp_view(self, view):
@@ -1206,23 +1326,23 @@ class Reviewer:
         self.set_range(1000, 5000)
 
     def sync_range_fields(self):
-        self.range_preset.set("Свое окно")
+        self.range_preset.set(self.t("Свое окно"))
         if self.ranges is not None and self.view is not None:
             values = np.interp([self.view[1], self.view[3]], np.arange(len(self.ranges)), self.ranges)
             self.range_low.set(f"{min(values):.1f}")
             self.range_high.set(f"{max(values):.1f}")
         if self.item and self.view == (0, 0, self.item["width"] - 1, self.item["height"] - 1):
-            self.range_preset.set("Весь кадр")
+            self.range_preset.set(self.t("Весь кадр"))
 
     def set_range(self, low, high):
         if self.ranges is None:
-            raise ValueError("В этом наборе нет физической оси дальности")
+            raise ValueError(self.t("В этом наборе нет физической оси дальности"))
         if not (math.isfinite(low) and math.isfinite(high) and low < high):
-            raise ValueError("Нижняя граница должна быть меньше верхней")
+            raise ValueError(self.t("Нижняя граница должна быть меньше верхней"))
         available_low, available_high = float(self.ranges[-1]), float(self.ranges[0])
         low, high = max(low, available_low), min(high, available_high)
         if low >= high:
-            raise ValueError(f"Окно вне данных: доступны {available_low:.0f}–{available_high:.0f} км")
+            raise ValueError(self.t("Окно вне данных: доступны {low:.0f}–{high:.0f} км", low=available_low, high=available_high))
         ys = np.interp([high, low], self.ranges[::-1], np.arange(len(self.ranges))[::-1])
         self.view = self.clamp_view((self.view[0], float(ys[0]), self.view[2], float(ys[1])))
         self.hide_label_menu()
@@ -1235,7 +1355,7 @@ class Reviewer:
             high = float(self.range_high.get().strip().replace(",", "."))
             self.set_range(low, high)
         except ValueError as exc:
-            self.feedback.config(text=f"Окно дальности: {exc}")
+            self.feedback.config(text=self.t("Окно дальности: {error}", error=exc))
         return "break"
 
     def preset_range(self, event=None):
@@ -1255,7 +1375,7 @@ class Reviewer:
             if not shapes and self.cluster_result:
                 shapes = self.cluster_result.shapes
         if not shapes:
-            self.feedback.config(text="Пока нет масок: задайте границы в км или выделите область")
+            self.feedback.config(text=self.t("Пока нет масок: задайте границы в км или выделите область"))
             return
         points = np.asarray([p for s in shapes for p in s["points"]], dtype=float)
         lo, hi = points.min(axis=0), points.max(axis=0)
@@ -1321,10 +1441,9 @@ class Reviewer:
         # endpoints. The same transform drives image sampling and vertices.
         affine = ((x1 - x0) / max(1, size[0] - 1), 0, x0,
                   0, (y1 - y0) / max(1, size[1] - 1), y0)
+        palette = self.palettes[self.palette_name.get()]
         if self.db is not None:
-            low, high = self.low.get(), max(self.low.get() + 1, self.high.get())
-            rgb = colormaps["turbo"](np.clip((np.nan_to_num(self.db, nan=low) - low) / (high - low), 0, 1), bytes=True)[:, :, :3]
-            base = Image.fromarray(rgb)
+            base = Image.fromarray(palette.background(self.db, self.low.get(), max(self.low.get() + 1, self.high.get())))
         else:
             base = self.original_image
         display = base.transform(size, Image.Transform.AFFINE, affine, Image.Resampling.NEAREST).convert("RGBA")
@@ -1336,18 +1455,19 @@ class Reviewer:
         if self.visible.get():
             for i, shape in enumerate(self.document["shapes"]):
                 pts = [local(p) for p in shape["points"]]
-                c = tuple(bytes.fromhex(COLORS[shape["label"]][1:]))
-                draw.polygon(pts, fill=c + (int(255 * self.opacity.get()),))
-                draw.line(pts + [pts[0]], fill=(255,255,255,255) if i in self.selection else c+(255,), width=3 if i in self.selection else 2)
+                palette.paint(draw, pts, shape["label"], self.opacity.get(), i in self.selection)
                 if i == self.selected and len(self.selection)==1 and not self.selected_candidates:
                     for px, py in pts:
                         draw.ellipse((px - 4, py - 4, px + 4, py + 4), fill=(255, 255, 255, 255), outline=(0, 0, 0, 255))
+            if self.captions.get():
+                for shape in self.document["shapes"]:
+                    palette.caption(draw, [local(p) for p in shape["points"]], shape["label"])
         if self.vertices:
             pts = [local(p) for p in self.vertices]
             if len(pts) > 1:
-                draw.line(pts, fill="white", width=2)
+                draw.line(pts, fill=palette.ink(), width=2)
             for px, py in pts:
-                draw.ellipse((px - 3, py - 3, px + 3, py + 3), fill="white")
+                draw.ellipse((px - 3, py - 3, px + 3, py + 3), fill=palette.ink())
         if self.cluster_result is not None:
             labelled = set()
             for index, shape in enumerate(self.cluster_result.shapes):
@@ -1365,10 +1485,10 @@ class Reviewer:
         self.canvas.create_rectangle(l, t, r, b, outline="#8b9bad")
         if self.region_start is not None and self.region_end is not None:
             self.canvas.create_rectangle(*self.to_canvas(*self.region_start),
-                *self.to_canvas(*self.region_end), outline="white", width=2, dash=(5, 4))
+                *self.to_canvas(*self.region_end), outline=palette.ink(), width=2, dash=(5, 4))
         if self.selection_box is not None:
             self.canvas.create_rectangle(*self.to_canvas(*self.selection_box[0]),
-                *self.to_canvas(*self.selection_box[1]), outline='#ffe79b',width=2,dash=(4,3))
+                *self.to_canvas(*self.selection_box[1]), outline=palette.marquee(),width=2,dash=(4,3))
         for v in np.linspace(x0, x1, 6):
             cx, _ = self.to_canvas(v, y0)
             text = f"{np.interp(v, np.arange(len(self.freq)), self.freq):.1f}" if self.freq is not None else f"{v:.0f}"
@@ -1377,21 +1497,21 @@ class Reviewer:
             _, cy = self.to_canvas(x0, v)
             text = f"{np.interp(v, np.arange(len(self.ranges)), self.ranges):.0f}" if self.ranges is not None else f"{v:.0f}"
             self.canvas.create_text(l - 8, cy, text=text, fill="#dbe6f1", anchor="e", font=("Segoe UI", 9))
-        self.canvas.create_text((l + r) / 2, b + 33, text="Частота, МГц" if self.freq is not None else "x, пиксели", fill="#dbe6f1")
-        self.canvas.create_text(l, 10, anchor="w", text="Действующая дальность, км" if self.ranges is not None else "y, пиксели", fill="#dbe6f1")
+        self.canvas.create_text((l + r) / 2, b + 33, text=self.t("Частота, МГц" if self.freq is not None else "x, пиксели"), fill="#dbe6f1")
+        self.canvas.create_text(l, 10, anchor="w", text=self.t("Действующая дальность, км" if self.ranges is not None else "y, пиксели"), fill="#dbe6f1")
         if self.db is not None:
-            self.canvas.create_text(r, 10, anchor="e", text=f"{self.low.get():.0f}–{max(self.low.get()+1,self.high.get()):.0f} дБ · turbo", fill="#dbe6f1")
+            self.canvas.create_text(r, 10, anchor="e", text=f"{self.low.get():.0f}–{max(self.low.get()+1,self.high.get()):.0f} {self.t("дБ")} · {self.t(palette.title())}", fill="#dbe6f1")
 
     def import_candidate(self):
         if self.store.manifest.get('assistance_disabled'):
-            self.feedback.configure(text='Независимая разметка: импорт подсказок отключён')
+            self.feedback.configure(text=self.t('Независимая разметка: импорт подсказок отключён'))
             return
         if (self.dirty or self.vertices) and not self.save():
             return
-        path = filedialog.askopenfilename(title="Кандидат LabelMe для текущего изображения", filetypes=[("LabelMe JSON", "*.json")])
+        path = filedialog.askopenfilename(title=self.t("Кандидат LabelMe для текущего изображения"), filetypes=[("LabelMe JSON", "*.json")])
         if not path:
             return
-        author = simpledialog.askstring("Происхождение разметки", "Автор / название модели:", parent=self.root)
+        author = simpledialog.askstring(self.t("Происхождение разметки"), self.t("Автор / название модели:"), parent=self.root)
         if not author:
             return
         try:
@@ -1399,12 +1519,12 @@ class Reviewer:
             self.load(self.index)
             self.refresh_cases()
         except Exception as exc:
-            messagebox.showerror("Ошибка импорта", str(exc))
+            messagebox.showerror(self.t("Ошибка импорта"), str(exc))
 
     def export(self):
         if (self.dirty or self.vertices) and not self.save():
             return
-        parent = filedialog.askdirectory(title="Папка для нового экспорта")
+        parent = filedialog.askdirectory(title=self.t("Папка для нового экспорта"))
         if not parent:
             return
         from datetime import datetime
@@ -1413,9 +1533,9 @@ class Reviewer:
             count = self.store.export(destination)
             self.export_path.set(str(destination.resolve()))
             self.save_settings()
-            messagebox.showinfo("Экспорт готов", f"Принятых изображений: {count}\n{destination}")
+            messagebox.showinfo(self.t("Экспорт готов"), self.t("Принятых изображений: {count}\n{destination}", count=count, destination=destination))
         except Exception as exc:
-            messagebox.showerror("Ошибка экспорта", str(exc))
+            messagebox.showerror(self.t("Ошибка экспорта"), str(exc))
 
     def close(self):
         if (self.dirty or self.vertices) and not self.save():

@@ -6,7 +6,8 @@ a = Analysis(
     [str(repo / 'packaging' / 'windows_entry.py')],
     pathex=[str(repo)],
     binaries=[],
-    datas=[],
+    datas=[(str(repo / 'ionoreview' / 'assets' / 'guide'), 'ionoreview/assets/guide'),
+           (str(repo / 'ionoreview' / 'assets' / 'icon'), 'ionoreview/assets/icon')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={'matplotlib': {'backends': ['Agg']}},
@@ -20,5 +21,6 @@ a = Analysis(
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='IonoReview',
           debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
-          console=False, disable_windowed_traceback=False)
+          console=False, disable_windowed_traceback=False,
+          icon=str(repo / 'ionoreview' / 'assets' / 'icon' / 'ionoreview.ico'))
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='IonoReview')

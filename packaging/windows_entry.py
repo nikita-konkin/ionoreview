@@ -108,8 +108,12 @@ def self_test(report_path):
     from ionoreview.clustering import ClusterParams, cluster_ionogram
     from ionoreview.data import ReviewStore, atomic_json, digest
     from ionoreview.folders import resolve_pack_folder, copy_pack
+    from ionoreview.guide import ASSETS, images
     from ionoreview import __version__
 
+    assert all((ASSETS / name).is_file() for name in images("ru")), "guide example images are missing from the bundle"
+    from ionoreview.theme import ICON
+    assert ICON.is_file(), "application icon is missing from the bundle"
     with tempfile.TemporaryDirectory(prefix="ionoreview-selftest-") as temp:
         # Windows CI can supply TEMP through an 8.3 alias or a junction.
         # Pack resolution returns canonical paths, so compare canonical roots.
@@ -176,7 +180,8 @@ def self_test(report_path):
                   "versions": {"numpy": np.__version__, "opencv": cv2.__version__,
                                "scipy": scipy.__version__, "sklearn": sklearn.__version__},
                   "checks": ["native imports", "PNG/NPZ", "DBSCAN", "K-means", "annotation IO", "Tk startup",
-                             "pack subfolders", "delivery wrapper", "pack switching", "annotations preserved"]}
+                             "pack subfolders", "delivery wrapper", "pack switching", "annotations preserved",
+                             "guide images"]}
         Path(report_path).parent.mkdir(parents=True, exist_ok=True)
         Path(report_path).write_text(json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8")
     return 0

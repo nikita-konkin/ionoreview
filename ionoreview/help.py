@@ -2,10 +2,13 @@
 
 HELP_TEXT = """ПРИЁМКА ИОНОГРАММ
 
-Верхняя панель: Каталог… открывает список наборов. Меню Файл содержит Открыть
-папку… (Ctrl+O), Сохранить набор как…, Импорт разметки LabelMe… и Экспорт принятых….
-Отдельная кнопка Открыть папку… есть в верхней панели; в каталоге доступна
-Открыть другую папку…. Можно выбрать весь комплект dataset либо вложенную
+Верхняя панель: меню Файл содержит Открыть папку… (Ctrl+O), Каталог…,
+Сохранить набор как…, Импорт разметки LabelMe… и Экспорт принятых…. Каталог…
+открывает список наборов; в нём доступна Открыть другую папку…. Меню Язык
+переключает интерфейс, справку и руководство между русским и английским
+(выбор запоминается в настройках набора). Правила разметки открывают руководство
+с примерами кадров, Справка — это описание всех кнопок. Можно выбрать весь
+комплект dataset либо вложенную
 папку images/annotations готового набора - программа найдёт его manifest.json.
 Архив только с JSON не содержит самих изображений: для просмотра нужен полный
 набор с manifest.json, images, arrays и annotations.
@@ -81,6 +84,9 @@ Enter в любом из двух полей делает то же. Допус�
 
 Шкала дБ — два ползунка границ цветовой шкалы. Меняется только отображение.
 Прозрачность — интенсивность заливки масок; контуры остаются видны.
+Цвета — «Моды»: ионограмма в оттенках серого, E/Es/1E оранжевым, 1F синим,
+2F зелёным, остальные метки серым пунктиром; «Turbo» — прежняя палитра.
+Подписи — названия классов слева от масок.
 Справа под графиком показаны частота и дальность под курсором.
 
 ЛЕВАЯ ПАНЕЛЬ
@@ -230,7 +236,246 @@ accepted_<дата-время> с принятыми PNG, JSON LabelMe, NPZ с �
 validation, test сохраняется. Тестовые данные нельзя использовать как примеры
 для настройки локальной модели. Экспорт сам по себе модель не обучает.
 
-Правила — открыть эту справку. Закрыть справку — закрыть только окно помощи.
+Справка — открыть это описание. Закрыть справку — закрыть только окно помощи.
+Правила разметки — открыть окно с короткими правилами отличия E, 1F, 2F и 3F и
+примерами кадров: верная лестница мод и типичная ошибка со сдвигом лестницы.
+Язык — выбрать русский или английский язык интерфейса, справки и руководства.
 Обычное закрытие главного окна сохраняет текущие правки; незавершённый полигон
 потребует завершить или отменить.
+"""
+
+HELP_TEXT_EN = """REVIEWING IONOGRAMS
+
+Top bar: the File menu holds Open folder… (Ctrl+O), Catalog…, Save pack as…,
+Import LabelMe annotations… and Export accepted…. Catalog… opens the list of
+packs; there you can also choose Open another folder…. The Language menu
+switches the interface, this help and the guide between Russian and English;
+the choice is remembered in the pack settings. Labeling guide opens the rules
+with example frames; Help is this description of every button. You may pick a
+whole dataset or a nested images/annotations folder of a ready pack: the program
+finds its manifest.json. An archive that holds only JSON has no images: to view it
+you need the full pack with manifest.json, images, arrays and annotations.
+The bar next to the title shows the share of accepted cases. All paths ▾ reveals
+the measurement and last-export paths; the PNG and result JSON are always visible.
+In packs for blind manual review, automatic hints and their import are switched
+off by the pack setting; the task states whether clustering is allowed.
+
+A labelling counts as reviewed only after the expert explicitly accepts it. Viewing,
+zooming, panning and contrast changes never alter object coordinates or status.
+Editing the geometry of an accepted mask returns the case to pending.
+
+TOOLS ABOVE THE PLOT
+
+Select / vertices - pick an object in the list or click inside a polygon. A selected
+object shows white vertices: drag them with the left mouse button. Dragging inside
+a mask moves it as a whole, keeping its shape. A mask never leaves the image.
+Move the whole group when dragging moves every polygon with the same non-empty
+group_id. One move is undone with Undo / Ctrl+Z. A plain click without a move does
+not change the acceptance status.
+
+Multi-select - drag a frame around several masks or candidates. Outlines that
+intersect the frame are chosen. Ctrl or Shift adds the frame to the current
+selection. In select mode Ctrl/Shift + click adds or removes one outline. The
+Objects list also supports Ctrl and Shift. Ctrl+A on the plot selects everything.
+
+After a selection a label menu appears right on the plot. Press 1F, 2F, E, Es,
+1E, 3F, Signal or Interference: all selected polygons get that label in one
+action. Selected candidates are added as editable labelling; the others stay in
+preview. Whole group widens the selection to every part of the chosen group/cluster.
+Clear selection removes the highlight and the menu. A right click on a selection
+opens the menu again; while drawing a polygon it closes the polygon as before.
+The menu changes no label until a class button is pressed.
+
+Polygon - draw a new object of the current class. Each click adds a vertex. Unfinished
+white lines are not yet a saved mask.
+
+Zoom area - zoom to a rectangle. Press and drag with the left button around the
+region you need. After release the program shows it and returns to the select tool.
+The labelling does not change.
+
+Close polygon - finish a polygon of at least three points. Alternatives: Enter with
+the plot focused, or the right mouse button. The points must enclose the band of the
+visible echo.
+
+Remove point - delete the last vertex of an unclosed polygon. May be pressed
+repeatedly. Alternatives: Backspace on the plot and Ctrl+Z while drawing. Finished
+polygons are not deleted by this button. With no unfinished points the button is disabled.
+
+Masks - show or hide the labelling overlay to inspect the raw signal.
+
+ZOOM AND RANGE
+
+Whole frame - show the entire stored frequency and range span.
+
+Around masks - zoom to the selected polygon with margins. With nothing selected, show
+all useful-signal masks. With no masks use Zoom area or enter range limits by hand.
+
++ / − - zoom in or out around the centre of the plot.
+
+Range, km - lower and upper limits of the display. Show applies them; Enter in
+either field does the same. A decimal point or comma is accepted. For example
+2700-2800 km. A window outside the measured span is not applied.
+
+Range list - presets 1000-5000, 1500-2000, 2000-2500, 2500-3000, 2700-3100,
+3000-3500, 3500-4000, 4500-5000 km. A choice changes only the range and keeps the
+current frequency span. The numeric fields show the applied limits.
+
+Wheel over the plot - zoom near the cursor. Shift + wheel changes only the range.
+The middle mouse button with dragging pans the view. Panels, buttons and fonts stay
+in place while the plot zooms. Zooming shows the original pixels without smoothing
+and adds no measurement resolution.
+
+dB scale - two sliders for the colour scale limits. Only the display changes.
+Opacity - the fill intensity of masks; outlines stay visible.
+Colors - "Modes": the ionogram in greys, E/Es/1E orange, 1F blue, 2F green, other
+labels grey dashed; "Turbo": the previous palette.
+Captions - class names to the left of the masks.
+The frequency and range under the cursor are shown at the right below the plot.
+
+LEFT PANEL
+
+Ionograms - the list of cases and their statuses. A choice opens the case. Edits to the
+previous one are saved on navigation. The scrollbar and the wheel over a free area of
+the form scroll the form; over a list they scroll the list itself.
+At start the last saved case opens; if there is none, the first pending ionogram is chosen.
+
+Expert - the name of the person accepting the current labelling. It is a record of
+the reviewer, not an electronic signature. Without a name acceptance is unavailable.
+
+Objects - polygons of the current image. Class, vertex count and group are shown.
+Choosing an object highlights it on the plot. Signal is a useful signal without an
+established physical mode. 1E, 1F, 2F and Interference are also available.
+
+Change class - give all selected objects the class from the drop-down list. Only the
+selection changes. To give a class to a whole group, first press Whole group in the
+plot menu. If a chosen part of a group gets another class, the program splits it into
+a new group and keeps the labels of the other parts.
+E, Es and 3F are also available. Agree on the meaning of E and 1E before training so that
+one physical class does not get two different labels.
+
+Delete - delete every selected polygon or reject the selected candidates.
+Alternative: Delete on the plot. The action can be undone with Undo or Ctrl+Z.
+
+Group… - set a shared number for separate polygons of one mode instance. The same
+number means parts of one object. 0 removes grouping. Different physical modes must
+not be merged merely because they share the class Signal.
+
+Undo - undo the last change of geometry, class or group. While drawing, it first removes
+the last unfinished point. Alternative: Ctrl+Z. After moving to another image the undo
+memory is cleared; earlier saved versions stay in the history folder.
+
+No useful signal - an explicit negative labelling. Needed to accept a case without signal
+masks. Incompatible with signal polygons.
+
+Expert note - the explanation of the review. A comment is required for needs-changes and
+ambiguous. The classes of physical modes and disputed areas are confirmed by the expert.
+An assistant or model draft is never a reference by itself.
+
+DECISIONS AND SAVING
+
+Accept and next - save the labelling with status accepted and open the next case. Needs
+the expert name and signal masks or an explicit mark of their absence.
+Alternative: Ctrl+Enter. Only accepted cases reach the export.
+
+Needs changes, next - status changes, a comment is required.
+Ambiguous, next - status ambiguous, a comment is required.
+Both decisions save the record and move on; they do not reach the export.
+
+← Back / Next → - move between ionograms without accepting. Existing edits are saved.
+An unclosed polygon must be finished or cancelled.
+
+Save - write the current changes and stay on the image. Alternative: Ctrl+S. Polygons,
+name, comment and the current status are saved. Measurement files do not change.
+The previous saved version goes to history. A version conflict between two windows
+working at once never silently overwrites someone else's edits.
+
+Esc - cancel the whole unfinished polygon or zoom frame. To remove only one point use
+Backspace or Remove point.
+
+PATHS AT THE BOTTOM OF THE WINDOW
+
+Source - the full path of the source HDF5/LFS or of an opened picture on the data disk.
+PNG for labeling - the actual image from the prepared local pack.
+Result JSON - the exact path of the current annotation; the file appears on saving.
+Last export - the folder of the last export of this pack.
+Copy - copy the corresponding full path to the clipboard.
+Open folder - open the location of the corresponding file in Explorer.
+The fields can be selected and copied but do not change where files live.
+
+IMPORT AND EXPORT
+
+Catalog… - open the library of prepared batches on disk N. Search works by station,
+type and date. Choose a row and press Open pack, or double-click it. The pilot with
+already accepted labelling is kept as a separate first batch.
+
+Open folder… - choose a ready pack with manifest.json or a folder of ordinary PNG,
+JPEG, BMP, TIFF files. For ordinary images then choose the place of the working folder:
+it receives copies of the PNG files, manifest.json and separate annotations. The
+originals are kept. Files of the chosen folder are read, without nested folders; at
+most 1000 images per batch. Read errors are written to manifest.json.
+Neighbouring LabelMe JSON files with the same name are imported automatically as
+drafts if sizes and classes are supported. The original JSON files do not change.
+Ordinary pictures have no numeric axis: coordinates and clustering are in pixels.
+If a PNG contains captions and margins, select the plot itself with Zoom area.
+
+Save pack as… - choose the place for a new copy of the whole working pack: images,
+annotations, history, settings. The program switches to the copy. This is how to change
+the working path of the results. Existing packs are not replaced.
+
+AUTOMATIC PRELIMINARY LABELLING
+
+Auto-label… - open the clustering parameters.
+Auto (DBSCAN) - the number of groups follows the density of points; single points may be
+treated as noise. Manual (K-means) - set the number of groups in the Count field, from 1
+to 30. This is the number of spatial clusters, not of physical modes. Before K-means the
+sparse noise points are dropped. After the minimum-size filter there may be fewer
+clusters. Groups are shown in different colours, the caption K1/K2 etc. is drawn once per
+group. One cluster may consist of several broken polygons; those are not extra clusters.
+
+Threshold - selects the strong points of the matrix. For measurements it is the dB of the
+source loader; for ordinary pictures it is brightness 0-255, without SNR meaning.
+On colour PNG files grey/white margins are excluded from the brightness feature. The
+quality of such processing must be checked, especially for an unfamiliar colour palette.
+
+Link along frequency / range sets the DBSCAN distance scale in MHz and km. For pictures
+without axes the scales are pixels x/y. K-means uses the same feature scales. The
+minimum of neighbours applies to DBSCAN only. Minimum points and minimum bandwidth/width
+cut off small groups and narrow vertical interference. Weak useful traces may drop out
+as well - tune the threshold.
+
+Visible area only limits the computation to the current zoom; without the tick the whole
+source matrix is processed. The limits are taken before the computation starts.
+Find clusters - start the computation in the background; the interface stays usable.
+On moving to another frame the results of the earlier computation are discarded.
+Close parameters closes only the settings window; the computation continues.
+
+Orange candidates K1, K2 etc. are not masks yet and are not exported.
+Add clusters - add them as Signal to the existing objects. Earlier masks are kept.
+The labelling becomes pending and needs review. Parts of one cluster get a shared group.
+Boundaries are widened by one source pixel to edit thin traces. Do not fill the
+background between branches.
+Hide candidates removes the preview without deleting the existing labelling.
+
+Then delete interference, correct vertices or move masks and assign the classes 1F, 2F,
+1E, E and so on. Touching modes may land in one cluster, a broken mode in several.
+To separate them reduce the link distances or delete the wrong polygon and draw the right
+parts. To merge, set a shared group. The algorithm never sets physical labels itself.
+
+Import LabelMe annotations… - choose a candidate JSON for the current PNG and give its
+author or model name. Sizes and the image name must match, coordinates are source PNG
+pixels with the origin at the top left corner. Polygons only. The import replaces the
+current objects, keeps the earlier version, and always returns the case to pending expert
+review. Normalised coordinates and boxes are converted to the agreed format first.
+
+Export accepted… - choose a parent folder. It gets a new folder accepted_<date-time> with
+the accepted PNG files, LabelMe JSON, NPZ with numeric axes and the manifest. An existing
+export is never overwritten. The train, validation and test split is kept. Test data must
+not be used as examples for tuning a local model. The export itself does not train a model.
+
+Help - open this description. Close help - close only the help window.
+Labeling guide - open the rules for telling E, 1F, 2F and 3F apart, with example frames:
+a correct mode ladder and the typical error of a shifted ladder.
+Language - choose Russian or English for the interface, the help and the guide.
+Closing the main window normally saves the current edits; an unfinished polygon must be
+finished or cancelled first.
 """

@@ -1,7 +1,9 @@
 import json
+import re
 import copy
 from types import SimpleNamespace
 import tkinter as tk
+from tkinter import ttk
 
 import numpy as np
 from PIL import Image
@@ -713,3 +715,202 @@ def test_labelling_repeated_candidate_reuses_existing_mask(reviewer):
     assert len(app.cluster_result.shapes)==3
     assert len(app.document['shapes'])==1
     assert app.document['shapes'][0]['label']=='Signal'
+
+
+def test_reviewer_paints_ionogram_in_greys_by_default(reviewer):
+    from PIL import ImageTk
+    reviewer.redraw()
+    image = ImageTk.getimage(reviewer.photo).convert("RGB")
+    red, green, blue = image.getpixel((image.width * 3 // 4, image.height * 3 // 4))
+    assert red == green == blue, "Default reviewer view is not a grey ionogram"
+
+
+def test_reviewer_paints_ionogram_in_turbo_when_chosen(reviewer):
+    from PIL import ImageTk
+    reviewer.palette_name.set("Turbo")
+    reviewer.redraw()
+    image = ImageTk.getimage(reviewer.photo).convert("RGB")
+    red, green, blue = image.getpixel((image.width * 3 // 4, image.height * 3 // 4))
+    assert not red == green == blue, "Turbo choice still leaves the ionogram grey"
+
+
+CYRILLIC = re.compile("[А-Яа-яЁё]")
+OWN_LANGUAGE_NAMES = {"Русский"}
+
+
+def visible_texts(app):
+    def walk(widget):
+        if isinstance(widget, tk.Menu):
+            last = widget.index("end")
+            for position in range(0 if last is not None else 1, (last or -1) + 1):
+                if widget.type(position) not in ("separator", "tearoff"):
+                    yield widget.entrycget(position, "label")
+        elif "text" in widget.keys():
+            yield str(widget.cget("text"))
+        if isinstance(widget, tk.Listbox):
+            yield from widget.get(0, "end")
+        for child in widget.winfo_children():
+            if not isinstance(child, tk.Toplevel):
+                yield from walk(child)
+    yield app.root.title()
+    yield app.range_preset.get()
+    yield from walk(app.root)
+
+
+def leftovers(app):
+    return sorted({t for t in visible_texts(app) if CYRILLIC.search(t) and t not in OWN_LANGUAGE_NAMES})
+
+
+def test_interface_starts_in_russian(reviewer):
+    assert reviewer.language.get() == "ru", "Default interface language is not Russian"
+
+
+def test_english_choice_translates_every_visible_text(reviewer):
+    reviewer.set_language("en")
+    reviewer.root.update()
+    assert not leftovers(reviewer), f"Cyrillic left in the English interface: {leftovers(reviewer)}"
+
+
+def test_english_choice_keeps_widgets_working(reviewer):
+    reviewer.set_language("en")
+    reviewer.document["shapes"] = [polygon()]
+    reviewer.refresh_objects()
+    reviewer.set_selection([0])
+    reviewer.apply_label("1F")
+    assert reviewer.feedback.cget("text") == "Label 1F assigned to polygons: 1", "Feedback is not English after applying a label"
+
+
+def test_english_status_texts_cover_every_review_status(reviewer):
+    from ionoreview.app import STATUS
+    reviewer.set_language("en")
+    assert not any(CYRILLIC.search(reviewer.t(text)) for text in STATUS.values()), "A review status stays Russian in English"
+
+
+def test_english_messages_after_actions_are_free_of_cyrillic(reviewer):
+    reviewer.set_language("en")
+    reviewer.focus_masks()
+    reviewer.document["shapes"] = [polygon()]
+    reviewer.refresh_objects()
+    reviewer.changed()
+    reviewer.set_range(1500, 2500)
+    reviewer.root.update()
+    assert not leftovers(reviewer), f"Cyrillic appeared after actions: {leftovers(reviewer)}"
+
+
+def test_returning_to_russian_restores_every_text(reviewer):
+    before = list(visible_texts(reviewer))
+    reviewer.set_language("en")
+    reviewer.set_language("ru")
+    assert list(visible_texts(reviewer)) == before, "Russian texts differ after a round trip"
+
+
+def test_unknown_language_choice_is_rejected(reviewer):
+    with pytest.raises(ValueError, match="de"):
+        reviewer.set_language("de")
+
+
+def test_language_choice_survives_a_new_session(reviewer, pack, tk_root):
+    from ionoreview.app import Reviewer
+    reviewer.set_language("en")
+    reviewer.save_settings()
+    root = tk.Toplevel(tk_root)
+    try:
+        assert Reviewer(root, pack.root).language.get() == "en", "Saved English choice was forgotten"
+    finally:
+        destroy_test_window(root)
+
+
+def test_language_choice_is_written_to_settings(reviewer):
+    reviewer.set_language("en")
+    saved = json.loads((reviewer.store.root / "settings.json").read_text(encoding="utf-8"))
+    assert saved["language"] == "en", "Settings do not record the language"
+
+
+def test_language_menu_offers_both_languages(reviewer):
+    menu = reviewer.language_menu
+    assert [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)] == ["Русский", "English"], "Language menu entries are wrong"
+
+
+def test_every_button_is_described_in_the_english_help(reviewer):
+    from ionoreview.help import HELP_TEXT_EN
+    reviewer.set_language("en")
+    def buttons(widget):
+        for child in widget.winfo_children():
+            if child.winfo_class() == "TButton":
+                yield child.cget("text")
+            yield from buttons(child)
+    missing = [t.split("   ")[0] for t in buttons(reviewer.root) if t.split("   ")[0] not in HELP_TEXT_EN]
+    assert not missing, f"English help lacks buttons: {missing}"
+
+
+def test_help_window_follows_the_chosen_language(reviewer):
+    reviewer.set_language("en")
+    reviewer.policy()
+    reviewer.root.update()
+    shown = reviewer.help_window.winfo_children()
+    text = next(w for w in shown if isinstance(w, tk.Text)).get("1.0", "end")
+    reviewer.help_window.destroy()
+    assert "REVIEWING IONOGRAMS" in text, "Help window ignored the English choice"
+
+
+def test_open_help_window_is_retranslated_on_language_change(reviewer):
+    reviewer.policy()
+    reviewer.set_language("en")
+    reviewer.root.update()
+    text = next(w for w in reviewer.help_window.winfo_children() if isinstance(w, tk.Text)).get("1.0", "end")
+    reviewer.help_window.destroy()
+    assert "REVIEWING IONOGRAMS" in text, "Open help window stayed Russian"
+
+
+def test_english_help_is_free_of_cyrillic_except_manifest_policy():
+    from ionoreview.help import HELP_TEXT_EN
+    assert not CYRILLIC.search(HELP_TEXT_EN), "English help contains Cyrillic text"
+
+
+def test_guide_button_and_menu_open_one_scrollable_window(reviewer):
+    reviewer.show_guide()
+    reviewer.root.update()
+    first = reviewer.guide.window
+    reviewer.show_guide()
+    assert reviewer.guide.window is first, "Second request opened another guide window"
+    first.destroy()
+
+
+def test_guide_window_embeds_every_example_image(reviewer):
+    from ionoreview.guide import images
+    reviewer.show_guide()
+    reviewer.root.update()
+    count = len(reviewer.guide.text.image_names())
+    reviewer.guide.window.destroy()
+    assert count == len(images("ru")), "Guide window lacks some example images"
+
+
+def test_guide_window_scrolls(reviewer):
+    reviewer.show_guide()
+    reviewer.root.update()
+    scrolled = reviewer.guide.text.cget("yscrollcommand")
+    reviewer.guide.window.destroy()
+    assert scrolled, "Guide text is not tied to a scrollbar"
+
+
+def test_guide_window_follows_language_change(reviewer):
+    reviewer.show_guide()
+    reviewer.set_language("en")
+    reviewer.root.update()
+    text = reviewer.guide.text.get("1.0", "end")
+    reviewer.guide.window.destroy()
+    assert "nose" in text and "носик" not in text, "Open guide did not switch to English"
+
+
+def test_guide_is_reachable_from_a_button(reviewer):
+    def buttons(widget):
+        for child in widget.winfo_children():
+            if child.winfo_class() == "TButton":
+                yield child.cget("text")
+            yield from buttons(child)
+    assert "Правила разметки" in list(buttons(reviewer.root)), "No guide button in the top bar"
+
+
+def test_every_guide_button_is_described_in_the_russian_help():
+    from ionoreview.help import HELP_TEXT
+    assert "Правила разметки" in HELP_TEXT and "Язык" in HELP_TEXT, "Russian help does not mention the guide and language menu"
