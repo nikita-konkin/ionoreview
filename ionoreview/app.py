@@ -150,6 +150,7 @@ class Reviewer:
         file_button=ttk.Menubutton(top,text='Файл')
         menu=tk.Menu(file_button,tearoff=False,font=('Segoe UI',10))
         menu.add_command(label='Открыть папку…',accelerator='Ctrl+O',command=self.open_folder)
+        menu.add_command(label='Создать проект из H5…',command=self.create_project)
         menu.add_command(label='Каталог…',command=self.open_library)
         menu.add_separator()
         menu.add_command(label='Сохранить набор как…',command=self.save_pack_as)
@@ -662,6 +663,14 @@ class Reviewer:
             pass
         return True
 
+    def create_project(self, source=None):
+        if (self.dirty or self.vertices) and not self.save():
+            return
+        from .project_dialog import create_project
+        destination = create_project(self.root, source)
+        if destination:
+            self.switch_pack(destination)
+
     def open_folder(self):
         if (self.dirty or self.vertices) and not self.save():
             return
@@ -678,6 +687,10 @@ class Reviewer:
             pack_folder = resolve_pack_folder(folder)
             if pack_folder is not None:
                 self.switch_pack(pack_folder)
+                return
+            from .prepare import measurements
+            if measurements(folder):
+                self.create_project(folder)
                 return
             require_image_files(folder)
             parent = filedialog.askdirectory(parent=self.root, title=self.t("Где создать рабочую папку с PNG и разметкой?"))

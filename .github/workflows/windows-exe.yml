@@ -45,7 +45,7 @@ jobs:
       - name: Test reviewer and packaging
         shell: pwsh
         run: |
-          & "$env:RUNNER_TEMP/ionoreview-venv/Scripts/python.exe" -m pytest tests/test_review.py tests/test_theme.py tests/test_palette.py tests/test_i18n.py tests/test_guide.py tests/test_clustering.py tests/test_archive.py tests/test_packaging.py tests/test_experiment.py -q
+          & "$env:RUNNER_TEMP/ionoreview-venv/Scripts/python.exe" -m pytest tests/test_review.py tests/test_theme.py tests/test_palette.py tests/test_i18n.py tests/test_guide.py tests/test_project.py tests/test_clustering.py tests/test_archive.py tests/test_packaging.py tests/test_experiment.py -q
           if ($LASTEXITCODE -ne 0) { throw "Reviewer tests failed" }
       - name: Build portable application and test frozen executable
         shell: pwsh

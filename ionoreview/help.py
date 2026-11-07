@@ -2,6 +2,13 @@
 
 HELP_TEXT = """ПРИЁМКА ИОНОГРАММ
 
+Создать проект из H5… — выбрать папку исходных H5/LFS (с подпапками), затем
+папку назначения. Создаётся отдельный проект: PNG в images, матрицы NPZ с
+физическими осями в arrays, разметка в annotations. Проект открывается автоматически.
+Неподходящие файлы пропускаются; причины записываются в manifest.json.
+Отмена останавливает обработку после текущего файла и сохраняет готовую часть.
+Исходники не изменяются. Готовый проект открывается через Открыть папку….
+
 Верхняя панель: меню Файл содержит Открыть папку… (Ctrl+O), Каталог…,
 Сохранить набор как…, Импорт разметки LabelMe… и Экспорт принятых…. Каталог…
 открывает список наборов; в нём доступна Открыть другую папку…. Меню Язык
@@ -245,6 +252,13 @@ validation, test сохраняется. Тестовые данные нель�
 """
 
 HELP_TEXT_EN = """REVIEWING IONOGRAMS
+
+Create project from H5… — choose a folder of H5/LFS soundings (subfolders included),
+then a destination folder. A separate project is created: PNG in images, NPZ
+matrices with physical axes in arrays, annotations in annotations. The project
+opens automatically. Unsuitable files are skipped and their reasons are written
+to manifest.json. Cancel stops after the current file and keeps the finished part.
+Source files are never changed. Reopen the project later with Open folder….
 
 Top bar: the File menu holds Open folder… (Ctrl+O), Catalog…, Save pack as…,
 Import LabelMe annotations… and Export accepted…. Catalog… opens the list of

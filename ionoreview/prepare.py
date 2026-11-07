@@ -21,12 +21,38 @@ POLICY = (
 )
 
 
-def prepare(paths, output, project, gate=(0, 8000)):
+PROJECT = Path(__file__).resolve().parent.parent / "vendor" / "ionograms_handler"
+SOUNDINGS = {".h5", ".lfs"}
+
+
+def measurements(folder):
+    return sorted(p for p in Path(folder).rglob("*") if p.is_file() and p.suffix.lower() in SOUNDINGS)
+
+
+def project_folder(parent, source):
+    from .folders import unique_folder
+    target = Path(parent) / f"{Path(source).name}_проект"
+    return unique_folder(parent, target.name) if target.exists() else target
+
+
+class PreparationCancelled(Exception):
+    pass
+
+
+def prepare(paths, output, project=None, gate=(0, 8000), progress=None, cancelled=None):
+    paths = list(paths)
+    if not paths:
+        raise ValueError("В папке нет файлов H5 или LFS")
+    if not np.isfinite(gate).all() or len(gate) != 2 or gate[0] >= gate[1]:
+        raise ValueError("Неверный диапазон дальности")
     output = Path(output).resolve()
     if output.exists():
         raise ValueError("Набор уже существует. Выберите новую папку")
-    sys.path.insert(0, str(Path(project).resolve()))
-    from muf import loader
+    try:
+        from muf import loader
+    except ImportError:
+        sys.path.insert(0, str(Path(project or PROJECT).resolve()))
+        from muf import loader
 
     output.mkdir(parents=True)
     (output / "images").mkdir()
@@ -34,6 +60,8 @@ def prepare(paths, output, project, gate=(0, 8000)):
     items, errors, valid_paths = [], [], []
     days = set()
     for path in paths:
+        if cancelled and cancelled():
+            break
         try:
             days.add(loader.read_header(path).datetime.date().isoformat())
             valid_paths.append(path)
@@ -47,6 +75,8 @@ def prepare(paths, output, project, gate=(0, 8000)):
     if len(dates) >= 3:
         splits[dates[-2]] = "validation"
     for number, path in enumerate(valid_paths, 1):
+        if cancelled and cancelled():
+            break
         path = Path(path).resolve()
         try:
             with warnings.catch_warnings(record=True) as recorded:
@@ -88,10 +118,15 @@ def prepare(paths, output, project, gate=(0, 8000)):
         except Exception as exc:
             errors.append({"source": str(path), "error": str(exc)})
             print(f"SKIP {path}: {exc}", flush=True)
+        if progress is not None:
+            progress(number, len(valid_paths), path.name)
     atomic_json(output / "manifest.json", {"schema": "ionoreview/1", "created_at": utcnow(),
-                "loader_project": str(Path(project).resolve()), "items": items,
+                "loader_project": str(Path(project or PROJECT).resolve()), "items": items,
                 "annotation_policy": POLICY, "errors": errors,
-                "sampling": "manual pilot selection; not statistically representative"})
+                "cancelled": bool(cancelled and cancelled()),
+                "sampling": "user-selected source files; splits assigned by whole UTC days"})
+    if cancelled and cancelled():
+        raise PreparationCancelled(f"Подготовка остановлена. Сохранено изображений: {len(items)}.\nПапка: {output}")
     if not items:
         raise ValueError("Не удалось подготовить ни одного изображения; см. manifest.json")
     return items

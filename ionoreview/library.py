@@ -83,6 +83,13 @@ def choose(root, library):
         try:
             destination = resolve_pack_folder(folder)
             if destination is None:
+                from .prepare import measurements
+                if measurements(folder):
+                    from .project_dialog import create_project
+                    destination = create_project(window, folder)
+                    if destination is None:
+                        return
+            if destination is None:
                 require_image_files(folder)
                 parent = filedialog.askdirectory(parent=window, title='Где создать рабочую папку с PNG и разметкой?')
                 if not parent:
@@ -100,6 +107,13 @@ def choose(root, library):
     open_button=ttk.Button(frame,text='Открыть набор',command=open_pack,style='Primary.TButton')
     open_button.pack(side='left',pady=(12,0))
     ttk.Button(frame,text='Открыть другую папку…',command=open_folder).pack(side='left',padx=12,pady=(12,0))
+    def new_project():
+        from .project_dialog import create_project
+        destination = create_project(window)
+        if destination:
+            selected.append(destination)
+            window.destroy()
+    ttk.Button(frame,text='Проект из H5…',command=new_project).pack(side='left',pady=(12,0))
     ttk.Button(frame,text='Отмена',command=window.destroy).pack(side='right')
     query.trace_add('write',update)
     update();entry.focus_set()

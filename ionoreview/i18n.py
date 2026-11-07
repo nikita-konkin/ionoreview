@@ -12,6 +12,7 @@ EN = {
     "Язык": "Language",
     "Файл": "File",
     "Открыть папку…": "Open folder…",
+    "Создать проект из H5…": "Create project from H5…",
     "Каталог…": "Catalog…",
     "Сохранить набор как…": "Save pack as…",
     "Импорт разметки LabelMe…": "Import LabelMe annotations…",

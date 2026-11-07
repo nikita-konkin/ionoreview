@@ -4,18 +4,18 @@ from pathlib import Path
 repo = Path(SPECPATH).parent
 a = Analysis(
     [str(repo / 'packaging' / 'windows_entry.py')],
-    pathex=[str(repo)],
+    pathex=[str(repo), str(repo / 'vendor' / 'ionograms_handler')],
     binaries=[],
     datas=[(str(repo / 'ionoreview' / 'assets' / 'guide'), 'ionoreview/assets/guide'),
            (str(repo / 'ionoreview' / 'assets' / 'icon'), 'ionoreview/assets/icon')],
-    hiddenimports=[],
+    hiddenimports=['muf.loader', 'h5py'],
     hookspath=[],
     hooksconfig={'matplotlib': {'backends': ['Agg']}},
     runtime_hooks=[],
     excludes=['torch', 'torchvision', 'transformers', 'peft', 'bitsandbytes', 'accelerate',
               'tensorflow', 'IPython', 'notebook', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
               'pytest', '_pytest', 'sklearn.datasets', 'sklearn.tests',
-              'ionoreview.finetune', 'ionoreview.archive', 'ionoreview.prepare'],
+              'ionoreview.finetune', 'ionoreview.archive'],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

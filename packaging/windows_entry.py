@@ -73,6 +73,15 @@ def launch(folder):
                         if (destination.parent / "catalog.json").is_file():
                             library_root = destination.parent
                         break
+                    from ionoreview.prepare import measurements
+                    if measurements(destination):
+                        from ionoreview.project_dialog import create_project
+                        project = create_project(root, destination)
+                        if project is None:
+                            root.destroy()
+                            return 0
+                        destination = project
+                        break
                     require_image_files(destination)
                     output = filedialog.askdirectory(parent=root, title="Где создать рабочий набор и сохранять разметку?")
                     if output:
@@ -80,7 +89,7 @@ def launch(folder):
                         break
                 except ValueError as exc:
                     messagebox.showinfo("ИоноРазметка", str(exc), parent=root)
-            selected = filedialog.askdirectory(parent=root, title="Выберите набор, каталог или папку изображений")
+            selected = filedialog.askdirectory(parent=root, title="Выберите проект, каталог, папку H5 или изображений")
             if not selected:
                 root.destroy()
                 return 0
@@ -114,6 +123,10 @@ def self_test(report_path):
     assert all((ASSETS / name).is_file() for name in images("ru")), "guide example images are missing from the bundle"
     from ionoreview.theme import ICON
     assert ICON.is_file(), "application icon is missing from the bundle"
+    import h5py
+    from muf import loader
+    from ionoreview.prepare import measurements
+    assert callable(loader.load) and h5py.__version__, "H5 project preparation is missing from the bundle"
     with tempfile.TemporaryDirectory(prefix="ionoreview-selftest-") as temp:
         # Windows CI can supply TEMP through an 8.3 alias or a junction.
         # Pack resolution returns canonical paths, so compare canonical roots.
